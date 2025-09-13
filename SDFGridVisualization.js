@@ -101,13 +101,11 @@ export async function updateVisualization(){
   for (const [key] of im.instanceMap){ const z=Number(key.split(',')[2]); needZ.add(z); }
   await Promise.all(Array.from(needZ, z=>this._ensureDenseLayer(z)));
 
-  const F=this.schema.fieldNames.length;
-
   for (const [key,id] of im.instanceMap){
     const [x,y,z]=key.split(',').map(Number);
     const { bx, by } = this._mapCellToDense(z, x, y);
     const arr=this._layerCache.get(z|0);
-    const val = arr ? (arr[this._denseIdx(F,bx,by,fi)] || 0) : 0;
+    const val = arr?.[by]?.[bx]?.[fi] || 0;
     const norm=Math.min(1,(val<=0?0:val)/max);
     im.setColorAt(id, this._valueToColor(norm));
   }

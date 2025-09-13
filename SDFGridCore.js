@@ -1,7 +1,7 @@
-// SDFGrid.js — dense 1024×1024 per-layer Float32 overlay with zero-template base,
+// SDFGrid.js — dense 1024×1024 per-layer nested-array overlay with zero-template base,
 // nucleus-centered alignment, SVG SDF, and Storage Buckets persistence.
 //
-// Dense overlay: one Float32Array per layer, length = 1024 * 1024 * F (F = #fields).
+// Dense overlay: one `[1024][1024][F]` array per layer (F = #fields).
 // First creation of a layer clones a zero template from the base store (base_zero)
 // and applies any existing sparse cell data center-aligned; zeros remain as padding.
 //
@@ -13,9 +13,8 @@
 //       - 'schema'          : { id, fields: string[] }
 //       - `z:${z}`          : { cx, cy, w, h, rule }
 //     'base'                : per-layer Int16 SDF (key = z)    [kept for SDF usage]
-//     'base_zero'           : Float32 zero template buffers     [NEW]
-//         key = `sid:${schemaId}`  -> ArrayBuffer(1024*1024*F*4)
-//     'overlay_layers'      : per-layer Float32 dense, key = z
+//     'base_zero'           : zero template buffers per schema
+//     'overlay_layers'      : per-layer dense arrays, key = z
 //     'overlay_layers_meta' : per-layer schema version { sid, fields }, key = z
 //
 // Console helpers exposed: SDF_layerInfo(uid,z), SDF_readCell(uid,z,x,y), SDF_centerCell(uid,z)
@@ -31,7 +30,7 @@ import { saveState, saveLogic, saveBlobs, loadState, loadLogic, loadBlobs, apply
 import { compileLogic } from './SDFGridLogic.js';
 import { createInterpolatedShapes, sdf, sdfGrad } from './SDFGridShape.js';
 import {
-  _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _denseIdx, _ensureDenseLayer,
+  _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _ensureDenseLayer,
   _mapCellToDense, _applySparseIntoDense, setDenseFromCell, addDenseFromCell,
   sampleDenseForCell, _flushDirtyLayers
 } from './SDFGridLayers.js';
@@ -86,7 +85,7 @@ export class SDFGrid{
     this.fieldForViz = params.fieldForViz || (initialFields.includes('O2') ? 'O2' : initialFields[0]);
 
     // caches and batching
-    this._layerCache = new Map(); // z -> Float32Array (dense)
+    this._layerCache = new Map(); // z -> nested dense arrays
     this._dirtyLayers = new Set();
     this._flushHandle = null;
 
@@ -147,7 +146,6 @@ Object.assign(SDFGrid.prototype, {
   _ensureZeroTemplate,
   _ensureBaseSDF,
   getBaseDistance,
-  _denseIdx,
   _ensureDenseLayer,
   _mapCellToDense,
   _applySparseIntoDense,

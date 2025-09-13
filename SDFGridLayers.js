@@ -2,32 +2,8 @@ import { DENSE_W, DENSE_H, STORE_BASE, STORE_BASEZ, STORE_LAYER, STORE_LMETA } f
 import { arraysEqual } from './SDFGridUtil.js';
 import { idbGet, idbPut } from './SDFGridStorage.js';
 
-function nestedToFloat32(nested, F){
-  const arr=new Float32Array(DENSE_W*DENSE_H*F);
-  for(let y=0;y<DENSE_H;y++){
-    const row=nested?.[y]||[];
-    for(let x=0;x<DENSE_W;x++){
-      const cell=row?.[x]||[];
-      const base=((y*DENSE_W)+x)*F;
-      for(let fi=0;fi<F;fi++) arr[base+fi]=cell[fi]||0;
-    }
-  }
-  return arr;
-}
-
-function float32ToNested(arr, F){
-  const out=new Array(DENSE_H);
-  for(let y=0;y<DENSE_H;y++){
-    const row=new Array(DENSE_W);
-    for(let x=0;x<DENSE_W;x++){
-      const base=((y*DENSE_W)+x)*F;
-      const cell=new Array(F);
-      for(let fi=0;fi<F;fi++) cell[fi]=arr[base+fi];
-      row[x]=cell;
-    }
-    out[y]=row;
-  }
-  return out;
+function cloneNested(base){
+  return base.map(row=>row.map(cell=>cell.slice()));
 }
 
 export async function _ensureZeroTemplate(){
@@ -36,10 +12,11 @@ export async function _ensureZeroTemplate(){
   const key=`sid:${this.schema.id}`;
   let stored=await idbGet(this._db, STORE_BASEZ, key);
   if (!stored){
-    stored=Array.from({length:DENSE_H},()=>Array.from({length:DENSE_W},()=>new Array(F).fill(0)));
+    stored=Array.from({length:DENSE_H},()=>
+      Array.from({length:DENSE_W},()=>new Array(F).fill(0)));
     await idbPut(this._db, STORE_BASEZ, key, stored);
   }
-  return nestedToFloat32(stored,F);
+  return stored;
 }
 
 export async function _ensureBaseSDF(z){
@@ -75,17 +52,16 @@ export async function getBaseDistance(z,x,y){
   return arr ? arr[y*W+x]/1000.0 : 0;
 }
 
-export function _denseIdx(F,xPix,yPix,fi){
-  return ((yPix*DENSE_W)+xPix)*F + fi;
-}
-
 export async function _ensureDenseLayer(z){
   const key=z|0;
   if (this._layerCache.has(key)) return this._layerCache.get(key);
 
   const targetSchema=this.schema;
+  const F=targetSchema.fieldNames.length;
+
   if (!this._db){
-    const arr=new Float32Array(DENSE_W*DENSE_H*targetSchema.fieldNames.length);
+    const arr=Array.from({length:DENSE_H},()=>
+      Array.from({length:DENSE_W},()=>new Array(F).fill(0)));
     this._layerCache.set(key,arr); return arr;
   }
 
@@ -93,10 +69,10 @@ export async function _ensureDenseLayer(z){
   const stored=await idbGet(this._db, STORE_LAYER, key);
 
   if (!stored){
-    const tmplArr=await this._ensureZeroTemplate();
-    const arr=new Float32Array(tmplArr); // clone
+    const tmpl=await this._ensureZeroTemplate();
+    const arr=cloneNested(tmpl);
     await this._applySparseIntoDense(z, arr);
-    await idbPut(this._db, STORE_LAYER, key, float32ToNested(arr,targetSchema.fieldNames.length));
+    await idbPut(this._db, STORE_LAYER, key, arr);
     await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
     this._layerCache.set(key,arr); return arr;
   }
@@ -104,29 +80,27 @@ export async function _ensureDenseLayer(z){
   const curSid=lmeta?.sid|0;
   const curList=lmeta?.fields || [];
   if (curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames)){
-    const arr=nestedToFloat32(stored, targetSchema.fieldNames.length);
-    this._layerCache.set(key,arr); return arr;
+    this._layerCache.set(key, stored); return stored;
   }
 
-  const old=nestedToFloat32(stored, curList.length);
+  const old=stored;
   const Fold=curList.length;
-  const Fnew=targetSchema.fieldNames.length;
-  const out=new Float32Array(DENSE_W*DENSE_H*Fnew);
+  const Fnew=F;
+  const out=Array.from({length:DENSE_H},()=>
+    Array.from({length:DENSE_W},()=>new Array(Fnew).fill(0)));
   const oldIdx=new Map(curList.map((n,i)=>[n,i]));
 
   for (let y=0;y<DENSE_H;y++){
-    const rowOld=y*DENSE_W*Fold;
-    const rowNew=y*DENSE_W*Fnew;
     for (let x=0;x<DENSE_W;x++){
-      const baseOld=rowOld + x*Fold;
-      const baseNew=rowNew + x*Fnew;
+      const cellOld=old[y]?.[x]||[];
+      const cellNew=out[y][x];
       for (const [name, fiNew] of targetSchema.index){
         const fiOld=oldIdx.get(name);
-        if (fiOld!=null) out[baseNew+fiNew] = old[baseOld+fiOld];
+        if (fiOld!=null) cellNew[fiNew]=cellOld[fiOld]||0;
       }
     }
   }
-  await idbPut(this._db, STORE_LAYER, key, float32ToNested(out,Fnew));
+  await idbPut(this._db, STORE_LAYER, key, out);
   await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
   this._layerCache.set(key,out); return out;
 }
@@ -145,7 +119,6 @@ export function _mapCellToDense(z, x, y){
 }
 
 export async function _applySparseIntoDense(z, arr){
-  const F=this.schema.fieldNames.length;
   const applyFields=this.schema.fieldNames;
   for (const key in this.dataTable){
     const parts=key.split(',');
@@ -154,24 +127,23 @@ export async function _applySparseIntoDense(z, arr){
     const x=Number(parts[0]), y=Number(parts[1]);
     if (x<0||x>=this.state.cellsX||y<0||y>=this.state.cellsY) continue;
     const { bx, by } = this._mapCellToDense(z, x, y);
-    const base=this._denseIdx(F, bx, by, 0);
+    const cell=arr[by][bx];
     const src=this.dataTable[key];
-    for (let fi=0; fi<F; fi++){
+    for (let fi=0; fi<applyFields.length; fi++){
       const name=applyFields[fi];
       const v=src[name] || 0;
-      if (v!==0) arr[base+fi]=v;
+      if (v!==0) cell[fi]=v;
     }
   }
 }
 
 export async function setDenseFromCell(z, xCell, yCell, values){
   const arr=await this._ensureDenseLayer(z);
-  const F=this.schema.fieldNames.length;
   const { bx, by } = this._mapCellToDense(z, xCell, yCell);
-  const base=this._denseIdx(F, bx, by, 0);
+  const cell=arr[by][bx];
   for (const [name,v] of Object.entries(values)){
     const fi=this.schema.index.get(name); if (fi==null) continue;
-    arr[base+fi] = v;
+    cell[fi] = v;
     this._maxField[name] = Math.max(this._maxField[name]||0, v||0);
     if (name==='O2') this._maxO2=Math.max(this._maxO2, v||0);
   }
@@ -181,13 +153,12 @@ export async function setDenseFromCell(z, xCell, yCell, values){
 
 export async function addDenseFromCell(z, xCell, yCell, values){
   const arr=await this._ensureDenseLayer(z);
-  const F=this.schema.fieldNames.length;
   const { bx, by } = this._mapCellToDense(z, xCell, yCell);
-  const base=this._denseIdx(F, bx, by, 0);
+  const cell=arr[by][bx];
   for (const [name,inc] of Object.entries(values)){
     const fi=this.schema.index.get(name); if (fi==null) continue;
-    const nxt=(arr[base+fi]||0) + inc;
-    arr[base+fi] = nxt;
+    const nxt=(cell[fi]||0) + inc;
+    cell[fi] = nxt;
     this._maxField[name] = Math.max(this._maxField[name]||0, nxt);
     if (name==='O2') this._maxO2=Math.max(this._maxO2, nxt);
   }
@@ -198,9 +169,8 @@ export async function addDenseFromCell(z, xCell, yCell, values){
 export async function sampleDenseForCell(z, xCell, yCell, field){
   const fi=this.schema.index.get(field); if (fi==null) return 0;
   const arr=await this._ensureDenseLayer(z);
-  const F=this.schema.fieldNames.length;
   const { bx, by } = this._mapCellToDense(z, xCell, yCell);
-  return arr[this._denseIdx(F, bx, by, fi)] || 0;
+  return arr[by]?.[bx]?.[fi] || 0;
 }
 
 export async function _flushDirtyLayers(){
@@ -210,9 +180,8 @@ export async function _flushDirtyLayers(){
   this._dirtyLayers.clear();
   await Promise.all(zs.map(async z=>{
     const arr=this._layerCache.get(z|0);
-    if (arr) await idbPut(this._db, STORE_LAYER, z|0, float32ToNested(arr,this.schema.fieldNames.length));
+    if (arr) await idbPut(this._db, STORE_LAYER, z|0, arr);
     await idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames });
   }));
   this._flushHandle=null;
 }
-
