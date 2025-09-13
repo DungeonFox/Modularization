@@ -23,7 +23,7 @@
 // Dependencies: THREE, utils.js (safeNum, clamp, lsSet, lsGet, updateRegistrySaved, logicKey, stateKey, blobsKey)
 //               svgParser.js (SVGPathParser.parseSVGPaths), logicPresets.js (presetCode)
 
-import { safeNum, clamp, lsSet, lsGet, updateRegistrySaved, logicKey, stateKey, blobsKey } from './utils.js';
+import { safeNum } from './utils.js';
 import { SVGPathParser } from './svgParser.js';
 import { presetCode } from './logicPresets.js';
 import {
@@ -34,6 +34,9 @@ import {
 import { normalizeUID, normalizeBucketName, arraysEqual } from './SDFGridUtil.js';
 import { openBucketLC, openFieldDB, idbGet, idbPut } from './SDFGridStorage.js';
 import { pickNucleusByDirection } from './SDFGridNucleus.js';
+import { saveState, saveLogic, saveBlobs, loadState, loadLogic, loadBlobs, applyBlobs } from './SDFGridPersistence.js';
+import { compileLogic } from './SDFGridLogic.js';
+import { createInterpolatedShapes, sdf, sdfGrad } from './SDFGridShape.js';
 
 const PARSE_SVG = SVGPathParser?.parseSVGPaths || null;
 
@@ -399,162 +402,6 @@ export class SDFGrid{
       envVariables:this.envVariables, trailStrength:this.trailStrength, decayRate:this.decayRate
     };
   }
-  saveState(){ lsSet(stateKey(this.uid), this.toStateJSON()); updateRegistrySaved(this.uid); }
-  saveLogic(){ const payload={ enabled:this.logic.enabled, preset:this.logic.preset, forceScale:this.logic.forceScale, code:this.logic.code }; lsSet(logicKey(this.uid), payload); }
-  saveBlobs(){
-    const sparse=[];
-    for (let z=0; z<this.effectiveCellsZ; z++){
-      for (let y=0; y<this.state.cellsY; y++){
-        for (let x=0; x<this.state.cellsX; x++){
-          const cell=(this.blobArray[z] && this.blobArray[z][y] && this.blobArray[z][y][x]) ? this.blobArray[z][y][x] : null;
-          const key=`${x},${y},${z}`; const data=this.dataTable[key];
-          if ((cell && cell.length) || data){
-            const particles = cell && cell.length ? cell.map(p=>({
-              o:[p.offset.x,p.offset.y,p.offset.z],
-              v:[p.velocity.x,p.velocity.y,p.velocity.z],
-              q:[p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w],
-              d:(p.d!=null?p.d:1),
-              t:(p.t!=null?p.t:0)
-            })) : [];
-            sparse.push({ x,y,z, particles, data });
-          }
-        }
-      }
-    }
-    lsSet(blobsKey(this.uid), {
-      layout:{ w:this.state.gridWidth, h:this.state.gridHeight, d:this.state.gridDepth, cx:this.state.cellsX, cy:this.state.cellsY, cz:this.effectiveCellsZ },
-      envVariables:this.envVariables, data:sparse, ts:Date.now(), uid:this.uid
-    });
-    updateRegistrySaved(this.uid);
-  }
-  static loadState(uid){ return lsGet(stateKey(uid)); }
-  static loadLogic(uid){ return lsGet(logicKey(uid)); }
-  static loadBlobs(uid){
-    const saved=lsGet(blobsKey(uid));
-    if (!saved || !saved.layout || !saved.data || !Array.isArray(saved.data)) return null;
-    const valid=saved.data.filter(c=>c && typeof c.x==='number' && typeof c.y==='number' && typeof c.z==='number');
-    return { layout:saved.layout, envVariables:saved.envVariables || ['O2','CO2','H2O'], data:valid };
-  }
-  applyBlobs(blobs){
-    if (!blobs || !blobs.layout || !blobs.data ||
-        blobs.layout.cx!==this.state.cellsX || blobs.layout.cy!==this.state.cellsY || blobs.layout.cz!==this.effectiveCellsZ){
-      for (let z=0; z<this.effectiveCellsZ; z++){
-        const yz=[]; for(let y=0; y<this.state.cellsY; y++){ const xz=[]; for(let x=0; x<this.state.cellsX; x++) xz.push([]); yz.push(xz); }
-        this.blobArray[z]=yz;
-      }
-      return;
-    }
-    this.envVariables = blobs.envVariables || this.envVariables;
-    this.dataTable = {};
-    blobs.data.forEach(cell=>{
-      if (!cell || typeof cell.x!=='number' || typeof cell.y!=='number' || typeof cell.z!=='number') return;
-      const {x,y,z,particles,data} = cell;
-      if (x>=0 && x<this.state.cellsX && y>=0 && y<this.state.cellsY && z>=0 && z<this.effectiveCellsZ){
-        if (particles && Array.isArray(particles)){
-          this.blobArray[z][y][x] = particles.map(p=>({
-            offset:new THREE.Vector3(p.o[0],p.o[1],p.o[2]),
-            velocity:new THREE.Vector3(p.v[0],p.v[1],p.v[2]),
-            orientation:new THREE.Quaternion(p.q[0],p.q[1],p.q[2],p.q[3]),
-            density:p.d!=null?p.d:1,
-            time:p.t!=null?p.t:0
-          }));
-        }
-        if (data && typeof data==='object'){
-          const key=`${x},${y},${z}`; this.dataTable[key] = { ...data };
-          if (data.O2) this._maxO2 = Math.max(this._maxO2, data.O2);
-        }
-      }
-    });
-  }
-
-  // ---------- SVG SDF ----------
-  createInterpolatedShapes(){
-    if (!this.svgShapes.length) return;
-    this.interpolatedShapes=[];
-    if (this.svgShapes.length===1){
-      for (let z=0; z<this.effectiveCellsZ; z++) this.interpolatedShapes.push({ vertices:this.svgShapes[0].vertices });
-    } else {
-      for (let z2=0; z2<this.effectiveCellsZ; z2++){
-        const t=(this.effectiveCellsZ<=1)?0:(z2/(this.effectiveCellsZ-1));
-        const scaled=t*(this.svgShapes.length-1);
-        const lo=Math.floor(scaled), hi=Math.min(lo+1,this.svgShapes.length-1);
-        const lt=scaled-lo;
-        if (lt<=1e-6){ this.interpolatedShapes.push({ vertices:this.svgShapes[lo].vertices }); }
-        else{
-          const a=this.svgShapes[lo].vertices, b=this.svgShapes[hi].vertices;
-          const N=Math.max(a.length,b.length), verts=new Array(N);
-          for (let i=0;i<N;i++){
-            const v1=a[i<a.length?i:a.length-1], v2=b[i<b.length?i:b.length-1];
-            verts[i]=new THREE.Vector2(v1.x+(v2.x-v1.x)*lt, v1.y+(v2.y-v1.y)*lt);
-          }
-          this.interpolatedShapes.push({ vertices:verts });
-        }
-      }
-    }
-  }
-  pointInPoly(p,V){
-    if (V.length<3) return false;
-    let inside=false, j=V.length-1;
-    for (let i=0;i<V.length;i++){
-      const yi=V[i].y, yj=V[j].y, xi=V[i].x, xj=V[j].x;
-      const inter=((yi>p.y)!==(yj>p.y)) && (p.x < (xj-xi)*(p.y-yi)/((yj-yi)||1e-12) + xi);
-      if (inter) inside=!inside; j=i;
-    }
-    return inside;
-  }
-  distToPoly(p,V){
-    if (V.length<2) return Infinity;
-    let md=Infinity;
-    for (let i=0;i<V.length;i++){
-      const j=(i+1)%V.length, v1=V[i], v2=V[j];
-      const A=p.x-v1.x, B=p.y-v1.y, C=v2.x-v1.x, D=v2.y-v1.y;
-      const l2=C*C+D*D; const t=l2?Math.max(0,Math.min(1,(A*C+B*D)/l2)):0;
-      const qx=v1.x+t*C, qy=v1.y+t*D;
-      const d=Math.hypot(p.x-qx,p.y-qy);
-      if (d<md) md=d;
-    }
-    return md;
-  }
-  sdf(point,zLayerIndex){
-    const rel=point.clone().sub(this.position);
-    const halfX=this.state.gridWidth/2, halfY=this.state.gridHeight/2, halfZ=this.state.gridDepth/2;
-    if (this.state.shapeType==='cube'){
-      const q=new THREE.Vector3(Math.abs(rel.x)-halfX, Math.abs(rel.y)-halfY, Math.abs(rel.z)-halfZ);
-      return Math.max(q.x,q.y,q.z);
-    }
-    if (this.state.shapeType==='sphere'){
-      const r=Math.max(this.state.gridWidth, this.state.gridHeight, this.state.gridDepth)/4;
-      return rel.length()-r;
-    }
-    if (this.state.shapeType==='custom' && this.state.customSVGPath && PARSE_SVG){
-      if (!this.interpolatedShapes.length){
-        if (!this.svgShapes.length) this.svgShapes = PARSE_SVG(this.state.customSVGPath);
-        this.createInterpolatedShapes();
-      }
-      const zi=clamp(zLayerIndex|0, 0, this.effectiveCellsZ-1);
-      const s=this.interpolatedShapes[zi];
-      if (!s || !s.vertices || s.vertices.length<3){
-        const q2=new THREE.Vector3(Math.abs(rel.x)-halfX, Math.abs(rel.y)-halfY, Math.abs(rel.z)-halfZ);
-        return Math.max(q2.x,q2.y,q2.z);
-      }
-      const s2=Math.min(this.state.gridWidth, this.state.gridHeight)/2;
-      const p2=new THREE.Vector2(rel.x/s2, rel.y/s2);
-      const inside=this.pointInPoly(p2, s.vertices);
-      const d2=this.distToPoly(p2, s.vertices);
-      const sd2=inside ? -d2 : d2;
-      const zDist=Math.abs(rel.z)-halfZ;
-      return Math.max(sd2*s2, zDist);
-    }
-    return Infinity;
-  }
-  sdfGrad(point,zLayerIndex){
-    const e=1e-2;
-    const dx=this.sdf(new THREE.Vector3(point.x+e,point.y,point.z),zLayerIndex)-this.sdf(new THREE.Vector3(point.x-e,point.y,point.z),zLayerIndex);
-    const dy=this.sdf(new THREE.Vector3(point.x,point.y+e,point.z),zLayerIndex)-this.sdf(new THREE.Vector3(point.x,point.y-e,point.z),zLayerIndex);
-    const dz=this.sdf(new THREE.Vector3(point.x,point.y,point.z+e),zLayerIndex)-this.sdf(new THREE.Vector3(point.x,point.y,point.z-e),zLayerIndex);
-    return new THREE.Vector3(dx,dy,dz).multiplyScalar(1/(2*e));
-  }
-
   // ---------- Grid init ----------
   initializeGrid(){
     const sizeX=this.state.gridWidth/this.state.cellsX;
@@ -584,25 +431,6 @@ export class SDFGrid{
       }
     }
   }
-
-  // ---------- Logic compile ----------
-  compileLogic(src){
-    src = src || "";
-    try{
-      const f = new Function('THREE','"use strict";\n'+src+'\n;return (typeof applyForce==="function")?applyForce:null;')(THREE);
-      if (typeof f!=='function') throw 0;
-      this.logic.compiled=(ctx)=>f(ctx); this.logic.compileError=null; this.logic.code=src; return true;
-    }catch(e1){
-      try{
-        const F=(0,eval)('(function(THREE){"use strict";'+src+';return (typeof applyForce==="function")?applyForce:null;})');
-        const g=F(THREE); if (typeof g!=='function') throw 0;
-        this.logic.compiled=(ctx)=>g(ctx); this.logic.compileError=null; this.logic.code=src; return true;
-      }catch(e2){
-        this.logic.compiled=null; this.logic.compileError=(e1?.message||String(e1))+' | '+(e2?.message||String(e2)); return false;
-      }
-    }
-  }
-
   // ---------- Update grid (dimensions/shape change) ----------
   async updateGrid(params){
     const oldDataTable={...this.dataTable};
@@ -966,3 +794,20 @@ export class SDFGrid{
     return m.getNucleus(z);
   }
 }
+
+Object.assign(SDFGrid.prototype, {
+  saveState,
+  saveLogic,
+  saveBlobs,
+  applyBlobs,
+  createInterpolatedShapes,
+  sdf,
+  sdfGrad,
+  compileLogic
+});
+
+Object.assign(SDFGrid, {
+  loadState,
+  loadLogic,
+  loadBlobs
+});
