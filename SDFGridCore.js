@@ -26,17 +26,20 @@
 import { safeNum } from './utils.js';
 import { SVGPathParser } from './svgParser.js';
 import { presetCode } from './logicPresets.js';
-import {
-  DENSE_W, DENSE_H,
-  IDB_NAME, IDB_VERSION,
-  STORE_META, STORE_BASE, STORE_BASEZ, STORE_LAYER, STORE_LMETA
-} from './SDFGridConstants.js';
+import { DENSE_W, DENSE_H, STORE_META } from './SDFGridConstants.js';
 import { normalizeUID, normalizeBucketName, arraysEqual } from './SDFGridUtil.js';
 import { openBucketLC, openFieldDB, idbGet, idbPut } from './SDFGridStorage.js';
 import { pickNucleusByDirection } from './SDFGridNucleus.js';
 import { saveState, saveLogic, saveBlobs, loadState, loadLogic, loadBlobs, applyBlobs } from './SDFGridPersistence.js';
 import { compileLogic } from './SDFGridLogic.js';
 import { createInterpolatedShapes, sdf, sdfGrad } from './SDFGridShape.js';
+import {
+  _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _denseIdx, _ensureDenseLayer,
+  _mapCellToDense, _applySparseIntoDense, setDenseFromCell, addDenseFromCell,
+  sampleDenseForCell, _flushDirtyLayers
+} from './SDFGridLayers.js';
+import { updateParticles } from './SDFGridParticles.js';
+import { visualizeGrid, _valueToColor, updateVisualization } from './SDFGridVisualization.js';
 
 const PARSE_SVG = SVGPathParser?.parseSVGPaths || null;
 
@@ -181,205 +184,6 @@ export class SDFGrid{
     // ensure zero template for current schema exists
     await this._ensureZeroTemplate();
   }
-
-  // ---------- Zero template (Float32 zeros in base_zero) ----------
-  async _ensureZeroTemplate(){
-    if (!this._db) return null;
-    const F=this.schema.fieldNames.length;
-    const key=`sid:${this.schema.id}`;
-    let buf = await idbGet(this._db, STORE_BASEZ, key);
-    if (!buf){
-      const zeros = new Float32Array(DENSE_W*DENSE_H*F); // all zeros
-      await idbPut(this._db, STORE_BASEZ, key, zeros.buffer);
-      buf = zeros.buffer;
-    }
-    return buf;
-  }
-
-  // ---------- Base SDF per layer (mm Int16) ----------
-  async _ensureBaseSDF(z){
-    if (!this._db) return null;
-    const W=this.state.cellsX, H=this.state.cellsY;
-    const key=z|0;
-    const buf=await idbGet(this._db, STORE_BASE, key);
-    if (buf) return new Int16Array(buf);
-
-    // compute SDF once
-    const sx=this.state.gridWidth/W, sy=this.state.gridHeight/H, sz=this.state.gridDepth/this.effectiveCellsZ;
-    const halfW=this.state.gridWidth/2, halfH=this.state.gridHeight/2, halfD=this.state.gridDepth/2;
-    const arr=new Int16Array(W*H);
-    let c=0;
-    for(let y=0;y<H;y++){
-      for(let x=0;x<W;x++){
-        const cx=x*sx+sx/2-halfW + this.position.x;
-        const cy=y*sy+sy/2-halfH + this.position.y;
-        const cz=z*sz+sz/2-halfD + this.position.z;
-        const d=this.sdf(new THREE.Vector3(cx,cy,cz), z);
-        const q=Math.max(-32767, Math.min(32767, Math.round(d*1000)));
-        arr[y*W+x]=q;
-        if ((++c & 0xFFFF)===0) await Promise.resolve();
-      }
-    }
-    await idbPut(this._db, STORE_BASE, key, arr.buffer);
-    return arr;
-  }
-  async getBaseDistance(z,x,y){
-    const W=this.state.cellsX,H=this.state.cellsY;
-    if(!this._db || x<0||y<0||x>=W||y>=H) return 0;
-    const arr=await this._ensureBaseSDF(z);
-    return arr ? arr[y*W+x]/1000.0 : 0;
-  }
-
-  // ---------- Dense overlay per layer (Float32 interleaved) ----------
-  _denseIdx(F,xPix,yPix,fi){ return ((yPix*DENSE_W)+xPix)*F + fi; }
-
-  // First creation path:
-  // 1) Clone zero template Float32Array (all zeros) into per-layer array.
-  // 2) Apply any existing sparse cell data center-aligned; keep zeros as padding.
-  async _ensureDenseLayer(z){
-    const key=z|0;
-    if (this._layerCache.has(key)) return this._layerCache.get(key);
-
-    const targetSchema = this.schema;
-    if (!this._db){
-      const arr=new Float32Array(DENSE_W*DENSE_H*targetSchema.fieldNames.length);
-      this._layerCache.set(key,arr); return arr;
-    }
-
-    const lmeta = await idbGet(this._db, STORE_LMETA, key);
-    const buf   = await idbGet(this._db, STORE_LAYER, key);
-
-    if (!buf){
-      // create from zero template
-      const tmplBuf = await this._ensureZeroTemplate();
-      const arr = new Float32Array(tmplBuf.slice(0)); // clone
-      // apply any preexisting sparse cell data into dense (center-aligned)
-      await this._applySparseIntoDense(z, arr);
-      await idbPut(this._db, STORE_LAYER, key, arr.buffer);
-      await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
-      this._layerCache.set(key,arr); return arr;
-    }
-
-    // have data; check schema
-    const curSid  = lmeta?.sid|0;
-    const curList = lmeta?.fields || [];
-    if (curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames)){
-      const arr=new Float32Array(buf);
-      this._layerCache.set(key,arr); return arr;
-    }
-
-    // up-convert dense to new schema
-    const old = new Float32Array(buf);
-    const Fold = curList.length;
-    const Fnew = targetSchema.fieldNames.length;
-    const out = new Float32Array(DENSE_W*DENSE_H*Fnew);
-    const oldIdx = new Map(curList.map((n,i)=>[n,i]));
-
-    for (let y=0;y<DENSE_H;y++){
-      const rowOld = y*DENSE_W*Fold;
-      const rowNew = y*DENSE_W*Fnew;
-      for (let x=0;x<DENSE_W;x++){
-        const baseOld = rowOld + x*Fold;
-        const baseNew = rowNew + x*Fnew;
-        for (const [name, fiNew] of targetSchema.index){
-          const fiOld = oldIdx.get(name);
-          if (fiOld!=null) out[baseNew+fiNew] = old[baseOld+fiOld];
-        }
-      }
-    }
-    await idbPut(this._db, STORE_LAYER, key, out.buffer);
-    await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
-    this._layerCache.set(key,out); return out;
-  }
-
-  // Map logical cell (x,y) to dense pixel (bx,by) using nucleus-centered alignment
-  _mapCellToDense(z, x, y){
-    const w=this.state.cellsX, h=this.state.cellsY;
-    const nuc=this.getNucleus(z); // logical nucleus
-    const dx = x - nuc.x;
-    const dy = y - nuc.y;
-    const sx = DENSE_W / Math.max(1,w);
-    const sy = DENSE_H / Math.max(1,h);
-    const baseC = { x: (DENSE_W>>1)-1, y: (DENSE_H>>1)-1 };
-    const bx = Math.max(0, Math.min(DENSE_W-1, baseC.x + Math.round(dx * sx)));
-    const by = Math.max(0, Math.min(DENSE_H-1, baseC.y + Math.round(dy * sy)));
-    return { bx, by };
-  }
-
-  // Apply existing sparse cell data to dense layer on first creation
-  async _applySparseIntoDense(z, arr){
-    const F = this.schema.fieldNames.length;
-    const applyFields = this.schema.fieldNames; // use current schema order
-    // Walk sparse table only for this z
-    for (const key in this.dataTable){
-      const parts = key.split(',');
-      const zi = Number(parts[2]||-1);
-      if (zi !== (z|0)) continue;
-      const x = Number(parts[0]), y = Number(parts[1]);
-      if (x<0||x>=this.state.cellsX||y<0||y>=this.state.cellsY) continue;
-      const { bx, by } = this._mapCellToDense(z, x, y);
-      const base = this._denseIdx(F, bx, by, 0);
-      const src = this.dataTable[key];
-      for (let fi=0; fi<F; fi++){
-        const name = applyFields[fi];
-        const v = src[name] || 0;
-        if (v!==0) arr[base+fi] = v;
-      }
-    }
-  }
-
-  async setDenseFromCell(z, xCell, yCell, values){
-    const arr = await this._ensureDenseLayer(z);
-    const F = this.schema.fieldNames.length;
-    const { bx, by } = this._mapCellToDense(z, xCell, yCell);
-    const base = this._denseIdx(F, bx, by, 0);
-    for (const [name,v] of Object.entries(values)){
-      const fi=this.schema.index.get(name); if (fi==null) continue;
-      arr[base+fi] = v;
-      this._maxField[name] = Math.max(this._maxField[name]||0, v||0);
-      if (name==='O2') this._maxO2=Math.max(this._maxO2, v||0);
-    }
-    this._dirtyLayers.add(z|0);
-    if (!this._flushHandle) this._flushHandle=setTimeout(()=>this._flushDirtyLayers(), 200);
-  }
-
-  async addDenseFromCell(z, xCell, yCell, values){
-    const arr = await this._ensureDenseLayer(z);
-    const F = this.schema.fieldNames.length;
-    const { bx, by } = this._mapCellToDense(z, xCell, yCell);
-    const base = this._denseIdx(F, bx, by, 0);
-    for (const [name,inc] of Object.entries(values)){
-      const fi=this.schema.index.get(name); if (fi==null) continue;
-      const nxt = (arr[base+fi]||0) + inc;
-      arr[base+fi] = nxt;
-      this._maxField[name] = Math.max(this._maxField[name]||0, nxt);
-      if (name==='O2') this._maxO2=Math.max(this._maxO2, nxt);
-    }
-    this._dirtyLayers.add(z|0);
-    if (!this._flushHandle) this._flushHandle=setTimeout(()=>this._flushDirtyLayers(), 200);
-  }
-
-  async sampleDenseForCell(z, xCell, yCell, field){
-    const fi = this.schema.index.get(field); if (fi==null) return 0;
-    const arr = await this._ensureDenseLayer(z);
-    const F = this.schema.fieldNames.length;
-    const { bx, by } = this._mapCellToDense(z, xCell, yCell);
-    return arr[this._denseIdx(F, bx, by, fi)] || 0;
-  }
-
-  async _flushDirtyLayers(){
-    if (this._disposed){ this._flushHandle=null; return; }
-    if (!this._db || !this._dirtyLayers.size){ this._flushHandle=null; return; }
-    const zs = Array.from(this._dirtyLayers);
-    this._dirtyLayers.clear();
-    await Promise.all(zs.map(async z=>{
-      const arr=this._layerCache.get(z|0);
-      if (arr) await idbPut(this._db, STORE_LAYER, z|0, arr.buffer);
-      await idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames });
-    }));
-    this._flushHandle=null;
-  }
-
   // ---------- Nucleus and centers ----------
   getNucleus(z){
     const zi=Math.min(Math.max(z|0,0), this.effectiveCellsZ-1);
@@ -521,190 +325,6 @@ export class SDFGrid{
     this.saveState();
   }
 
-  // ---------- Particles -> fields ----------
-  async updateParticles(particles, dt){
-    if (this._disposed) return;
-    const rev=this._rev;
-
-    const sX=this.state.gridWidth/this.state.cellsX;
-    const sY=this.state.gridHeight/this.state.cellsY;
-    const sZ=this.state.gridDepth/this.effectiveCellsZ;
-
-    // clear legacy arrays
-    for (let z=0; z<this.effectiveCellsZ; z++)
-      for (let y=0; y<this.state.cellsY; y++)
-        for (let x=0; x<this.state.cellsX; x++)
-          if (this.blobArray[z][y][x]!==null) this.blobArray[z][y][x].length=0;
-
-    const updated = new Map();
-
-    for (let i=0;i<particles.length;i++){
-      const p=particles[i];
-      const zi=this.zLayerIndexFromWorldZ(p.position.z);
-      const sd=this.sdf(p.position, zi);
-      const inside = sd<0;
-      const grad = this.sdfGrad(p.position, zi);
-
-      if (this.logic.enabled && this.logic.compiled){
-        try{
-          this.logic.compiled({ p, dt, sd, inside, grad, center:this.position, zIndex:zi, uid:this.uid, forceScale:(typeof this.logic.forceScale==='number'?this.logic.forceScale:1), state:this.state });
-        }catch{
-          const v=this.position.clone().sub(p.position); const L=v.length()||1e-6; p.velocity.addScaledVector(v,0.2*dt/L);
-        }
-      } else {
-        const v=this.position.clone().sub(p.position); const L=v.length()||1e-6; p.velocity.addScaledVector(v,0.2*dt/L);
-        if (inside) p.velocity.multiplyScalar(0.995);
-      }
-
-      if (inside){
-        const x=Math.floor((p.position.x - (this.position.x - this.state.gridWidth/2))/sX);
-        const y=Math.floor((p.position.y - (this.position.y - this.state.gridHeight/2))/sY);
-        const z=Math.floor((p.position.z - (this.position.z - this.state.gridDepth/2))/sZ);
-        if (x>=0&&x<this.state.cellsX && y>=0&&y<this.state.cellsY && z>=0&&z<this.effectiveCellsZ && this.blobArray[z][y][x]!==null){
-          const k=`${x},${y},${z}`; if (!updated.has(k)) updated.set(k,{x,y,z,count:0}); updated.get(k).count++;
-        }
-      }
-    }
-
-    // apply to dense overlay (increment all fields equally by default)
-    for (const [,c] of updated){
-      const inc = this.trailStrength * c.count;
-      const vals = Object.fromEntries(this.schema.fieldNames.map(n=>[n,inc]));
-      await this.addDenseFromCell(c.z, c.x, c.y, vals);
-    }
-    if (!this._flushHandle && this._dirtyLayers.size) this._flushHandle=setTimeout(()=>this._flushDirtyLayers(), 200);
-
-    this.updateDispersion(dt);
-    if (this._disposed || this._rev!==rev) return;
-    await this.updateVisualization();
-
-    const now=performance.now();
-    if (now - this._lastBlobSave > 2000){
-      this.saveBlobs();
-      this._lastBlobSave = now;
-    }
-  }
-
-  // ---------- Visualization ----------
-  visualizeGrid(){
-    if (this._disposed) return;
-    const rev=this._rev;
-
-    if (this.gridGroup){
-      this.scene.remove(this.gridGroup);
-      this.gridGroup.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); });
-    }
-
-    const group=new THREE.Group();
-
-    const sizeX=this.state.gridWidth/this.state.cellsX;
-    const sizeZ=this.state.gridDepth/this.state.cellsZ;
-    const halfW=this.state.gridWidth/2, halfD=this.state.gridDepth/2;
-    const yBase=this.position.y - this.state.gridHeight/2;
-    const yStep=this.state.gridHeight/this.effectiveCellsZ;
-
-    // wire mesh
-    const geo=new THREE.BufferGeometry(), verts=[], norms=[], cols=[], idxs=[];
-    const col=new THREE.Color();
-    for (let zL=0; zL<=this.effectiveCellsZ; zL++){
-      const y=yBase - zL*yStep;
-      for (let i=0;i<=this.state.cellsX;i++){
-        const x=this.position.x - halfW + i*sizeX;
-        for (let j=0;j<=this.state.cellsZ;j++){
-          const z=this.position.z - halfD + j*sizeZ;
-          verts.push(x,y,z); norms.push(0,1,0);
-          col.setRGB(1,1,1,THREE.SRGBColorSpace); cols.push(col.r,col.g,col.b);
-        }
-      }
-    }
-    const stride=this.state.cellsZ+1;
-    for (let zL=0; zL<this.effectiveCellsZ; zL++){
-      const off=zL*(this.state.cellsX+1)*(this.state.cellsZ+1);
-      for (let i=0;i<this.state.cellsX;i++){
-        for (let j=0;j<this.state.cellsZ;j++){
-          const a=off+i*stride+(j+1), b=off+i*stride+j, c=off+(i+1)*stride+j, d=off+(i+1)*stride+(j+1);
-          idxs.push(a,b,d, b,c,d);
-        }
-      }
-    }
-    geo.setIndex(idxs);
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts,3));
-    geo.setAttribute('normal',   new THREE.Float32BufferAttribute(norms,3));
-    geo.setAttribute('color',    new THREE.Float32BufferAttribute(cols,3));
-    const mat=new THREE.MeshBasicMaterial({ vertexColors:true, side:THREE.DoubleSide, transparent:true, opacity:0.12, wireframe:true });
-    group.add(new THREE.Mesh(geo,mat));
-
-    // instanced cells
-    const boxG=new THREE.BoxGeometry(sizeX, this.state.gridHeight/this.state.cellsY, this.state.gridDepth/this.effectiveCellsZ);
-    const boxM=new THREE.MeshBasicMaterial({ opacity:0.2, transparent:true, wireframe:true });
-    const maxInst=this.state.cellsX*this.state.cellsY*this.effectiveCellsZ;
-    const imesh=new THREE.InstancedMesh(boxG, boxM, maxInst);
-    let id=0; const map=new Map();
-
-    const halfWidth=this.state.gridWidth/2, halfHeight=this.state.gridHeight/2, halfDepth=this.state.gridDepth/2;
-    for (let z2=0; z2<this.effectiveCellsZ; z2++){
-      for (let y2=0; y2<this.state.cellsY; y2++){
-        for (let x2=0; x2<this.state.cellsX; x2++){
-          const cx=x2*sizeX + sizeX/2 - halfWidth + this.position.x;
-          const cy=y2*(this.state.gridHeight/this.state.cellsY) + (this.state.gridHeight/this.state.cellsY)/2 - halfHeight + this.position.y;
-          const cz=z2*(this.state.gridDepth/this.effectiveCellsZ) + (this.state.gridDepth/this.effectiveCellsZ)/2 - halfDepth + this.position.z;
-          if (this.sdf(new THREE.Vector3(cx,cy,cz), z2) < 0){
-            imesh.setMatrixAt(id, new THREE.Matrix4().setPosition(cx,cy,cz));
-            map.set(`${x2},${y2},${z2}`, id);
-            id++;
-          }
-        }
-      }
-    }
-    imesh.count=id;
-    imesh.instanceMap=map;
-    group.add(imesh);
-
-    if (this._disposed || this._rev!==rev){
-      group.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); });
-      return;
-    }
-
-    this.instancedMesh=imesh;
-    this.gridGroup=group;
-    this.scene.add(this.gridGroup);
-
-    this.updateVisualization();
-  }
-
-  _valueToColor(norm){
-    if (norm<=0) return new THREE.Color(0.2,0.2,1.0);
-    if (norm<0.5){ const t=norm*2; return new THREE.Color(0.2*(1-t), 0.2+0.8*t, 1.0*(1-t)); }
-    const t=(norm-0.5)*2; return new THREE.Color(0.8*t+0.2*(1-t), 1.0*(1-t), 0);
-  }
-
-  async updateVisualization(){
-    if (this._disposed) return;
-    const im=this.instancedMesh;
-    if (!im || !im.instanceMap) return;
-
-    const field=this.fieldForViz;
-    const fi=this.schema.index.get(field) ?? 0;
-    let max = this._maxField[field] || 0; if (max<=0) max=1;
-
-    // ensure all referenced dense layers are resident
-    const needZ=new Set();
-    for (const [key] of im.instanceMap){ const z=Number(key.split(',')[2]); needZ.add(z); }
-    await Promise.all(Array.from(needZ, z=>this._ensureDenseLayer(z)));
-
-    const F=this.schema.fieldNames.length;
-
-    for (const [key,id] of im.instanceMap){
-      const [x,y,z]=key.split(',').map(Number);
-      const { bx, by } = this._mapCellToDense(z, x, y);
-      const arr=this._layerCache.get(z|0);
-      const val = arr ? (arr[this._denseIdx(F,bx,by,fi)] || 0) : 0;
-      const norm=Math.min(1,(val<=0?0:val)/max);
-      im.setColorAt(id, this._valueToColor(norm));
-    }
-    if (im.instanceColor) im.instanceColor.needsUpdate=true;
-  }
-
   // ---------- Misc ----------
   zLayerIndexFromWorldZ(zWorld){
     const fine=this.state.gridDepth/this.effectiveCellsZ;
@@ -803,7 +423,22 @@ Object.assign(SDFGrid.prototype, {
   createInterpolatedShapes,
   sdf,
   sdfGrad,
-  compileLogic
+  compileLogic,
+  _ensureZeroTemplate,
+  _ensureBaseSDF,
+  getBaseDistance,
+  _denseIdx,
+  _ensureDenseLayer,
+  _mapCellToDense,
+  _applySparseIntoDense,
+  setDenseFromCell,
+  addDenseFromCell,
+  sampleDenseForCell,
+  _flushDirtyLayers,
+  updateParticles,
+  visualizeGrid,
+  _valueToColor,
+  updateVisualization
 });
 
 Object.assign(SDFGrid, {
