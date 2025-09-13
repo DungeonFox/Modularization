@@ -29,11 +29,11 @@ import { presetCode } from './logicPresets.js';
 import {
   DENSE_W, DENSE_H,
   IDB_NAME, IDB_VERSION,
-  STORE_META, STORE_BASE, STORE_BASEZ, STORE_LAYER, STORE_LMETA,
-  normalizeUID, normalizeBucketName, openBucketLC,
-  openFieldDB, idbGet, idbPut, arraysEqual,
-  pickNucleusByDirection
-} from './SDFGridHelpers.js';
+  STORE_META, STORE_BASE, STORE_BASEZ, STORE_LAYER, STORE_LMETA
+} from './SDFGridConstants.js';
+import { normalizeUID, normalizeBucketName, arraysEqual } from './SDFGridUtil.js';
+import { openBucketLC, openFieldDB, idbGet, idbPut } from './SDFGridStorage.js';
+import { pickNucleusByDirection } from './SDFGridNucleus.js';
 
 const PARSE_SVG = SVGPathParser?.parseSVGPaths || null;
 
