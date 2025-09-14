@@ -179,6 +179,11 @@ export function setCellData(x,y,z,values,skipSave=false){
     const idxO2=this.envVariables.indexOf('O2');
     if (idxO2!==-1 && cur[idxO2]) this._maxO2=Math.max(this._maxO2, cur[idxO2]);
   }
+
+  const obj={};
+  for (let i=0;i<F;i++) obj[this.envVariables[i]] = cur[i] || 0;
+  this.setDenseFromCell(z, x, y, obj).catch(()=>{});
+
   if (!skipSave) this.saveBlobs();
   return true;
 }
@@ -192,14 +197,26 @@ export function updateDispersion(dt){
   if (idxO2===-1) return;
   const decay=Math.exp(-this.decayRate);
   let maxO2=1;
+  const F=this.envVariables.length;
   for (const key in this.dataTable){
     const arr=this.dataTable[key];
     const val=arr[idxO2] || 0;
     if (val){
       const v=val*decay;
-      if (v<0.01) delete this.dataTable[key];
-      else { arr[idxO2]=v; maxO2=Math.max(maxO2, v); }
+      if (v<0.01){
+        arr[idxO2]=0;
+        const obj={}; for(let i=0;i<F;i++) obj[this.envVariables[i]] = arr[i] || 0;
+        const [x,y,z]=key.split(',').map(Number);
+        this.setDenseFromCell(z,x,y,obj).catch(()=>{});
+        delete this.dataTable[key];
+        continue;
+      } else {
+        arr[idxO2]=v; maxO2=Math.max(maxO2, v);
+      }
     }
+    const obj={}; for(let i=0;i<F;i++) obj[this.envVariables[i]] = arr[i] || 0;
+    const [x,y,z]=key.split(',').map(Number);
+    this.setDenseFromCell(z,x,y,obj).catch(()=>{});
   }
   this._maxO2=maxO2;
 }

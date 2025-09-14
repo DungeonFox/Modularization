@@ -92,11 +92,8 @@ export function applyBlobs(blobs){
         }));
       }
       if (Array.isArray(data)){
-        const key=`${x},${y},${z}`;
         const arr=data.slice(0, this.envVariables.length);
-        this.dataTable[key] = arr;
-        const idxO2=this.envVariables.indexOf('O2');
-        if (idxO2!==-1 && arr[idxO2]) this._maxO2 = Math.max(this._maxO2, arr[idxO2]);
+        this.setCellData(x,y,z,arr,true);
       }
     }
   });
