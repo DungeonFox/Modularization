@@ -119,7 +119,6 @@ export function _mapCellToDense(z, x, y){
 
 export async function _applySparseIntoDense(z, arr){
   const F=this.schema.fieldNames.length;
-  const applyFields=this.schema.fieldNames;
   for (const key in this.dataTable){
     const parts=key.split(',');
     const zi=Number(parts[2]||-1);
@@ -129,9 +128,9 @@ export async function _applySparseIntoDense(z, arr){
     const { bx, by } = this._mapCellToDense(z, x, y);
     const base=this._denseIdx(F, bx, by, 0);
     const src=this.dataTable[key];
+    if (!Array.isArray(src)) continue;
     for (let fi=0; fi<F; fi++){
-      const name=applyFields[fi];
-      const v=src[name] || 0;
+      const v=src[fi] || 0;
       if (v!==0) arr[base+fi]=v;
     }
   }

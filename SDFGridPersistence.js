@@ -17,7 +17,7 @@ export function saveBlobs(){
       for (let x=0; x<this.state.cellsX; x++){
         const cell=(this.blobArray[z] && this.blobArray[z][y] && this.blobArray[z][y][x]) ? this.blobArray[z][y][x] : null;
         const key=`${x},${y},${z}`; const data=this.dataTable[key];
-        if ((cell && cell.length) || data){
+        if ((cell && cell.length) || (Array.isArray(data) && data.some(v=>v!==0))){
           const particles = cell && cell.length ? cell.map(p=>({
             o:[p.offset.x,p.offset.y,p.offset.z],
             v:[p.velocity.x,p.velocity.y,p.velocity.z],
@@ -25,7 +25,7 @@ export function saveBlobs(){
             d:(p.d!=null?p.d:1),
             t:(p.t!=null?p.t:0)
           })) : [];
-          sparse.push({ x,y,z, particles, data });
+          sparse.push({ x,y,z, particles, data: data ? data.slice() : undefined });
         }
       }
     }
@@ -70,9 +70,12 @@ export function applyBlobs(blobs){
           time:p.t!=null?p.t:0
         }));
       }
-      if (data && typeof data==='object'){
-        const key=`${x},${y},${z}`; this.dataTable[key] = { ...data };
-        if (data.O2) this._maxO2 = Math.max(this._maxO2, data.O2);
+      if (Array.isArray(data)){
+        const key=`${x},${y},${z}`;
+        const arr=data.slice(0, this.envVariables.length);
+        this.dataTable[key] = arr;
+        const idxO2=this.envVariables.indexOf('O2');
+        if (idxO2!==-1 && arr[idxO2]) this._maxO2 = Math.max(this._maxO2, arr[idxO2]);
       }
     }
   });
