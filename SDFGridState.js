@@ -100,7 +100,9 @@ export async function updateGrid(params){
     const yi=Math.floor((cy - (this.position.y - this.state.gridHeight/2))/sYn);
     const zi=Math.floor((cz - (this.position.z - this.state.gridDepth/2))/sZn);
     if (xi>=0&&xi<this.state.cellsX && yi>=0&&yi<this.state.cellsY && zi>=0&&zi<this.effectiveCellsZ){
-      const d=this.getCellData(xi,yi,zi), cur=d?(d.O2||0):0;
+      const d=this.getCellData(xi,yi,zi);
+      const o2Idx=this.schema.index.get('O2');
+      const cur=d ? d[o2Idx||0] || 0 : 0;
       this.setCellData(xi,yi,zi,{O2:cur}, true);
     }
   }
@@ -151,20 +153,24 @@ export function zLayerIndexFromWorldZ(zWorld){
 export function getCellData(x,y,z){
   if (x<0||x>=this.state.cellsX||y<0||y>=this.state.cellsY||z<0||z>=this.effectiveCellsZ) return null;
   const key=`${x},${y},${z}`;
-  return this.dataTable[key] || this.envVariables.reduce((o,k)=>{o[k]=0; return o;}, {});
+  return this.dataTable[key] || new Float32Array(this.schema.fieldNames.length);
 }
 
 export function setCellData(x,y,z,values,skipSave=false){
   if (x<0||x>=this.state.cellsX||y<0||y>=this.state.cellsY||z<0||z>=this.effectiveCellsZ) return false;
   const key=`${x},${y},${z}`;
-  const cur=this.dataTable[key] || this.envVariables.reduce((o,k)=>{o[k]=0; return o;}, {});
-  const upd={...cur, ...values};
-  const allZero=this.envVariables.every(k => (upd[k]||0)===0);
-  if (allZero) delete this.dataTable[key];
-  else {
-    this.dataTable[key]=upd;
-    if (upd.O2) this._maxO2=Math.max(this._maxO2, upd.O2);
+  const F=this.schema.fieldNames.length;
+  const arr=this.dataTable[key] || new Float32Array(F);
+  for (const [name,v] of Object.entries(values)){
+    const fi=this.schema.index.get(name);
+    if (fi==null) continue;
+    arr[fi]=v;
+    if (name==='O2') this._maxO2=Math.max(this._maxO2, v);
   }
+  let allZero=true;
+  for (let i=0;i<F;i++){ if (arr[i]!==0){ allZero=false; break; } }
+  if (allZero) delete this.dataTable[key];
+  else this.dataTable[key]=arr;
   if (!skipSave) this.saveBlobs();
   return true;
 }
@@ -176,12 +182,23 @@ export function updateDispersion(dt){
 
   const decay=Math.exp(-this.decayRate);
   let maxO2=1;
-  for (const key in this.dataTable){
-    const d=this.dataTable[key];
-    if (d.O2){
-      const v=d.O2*decay;
-      if (v<0.01) delete this.dataTable[key];
-      else { this.dataTable[key].O2=v; maxO2=Math.max(maxO2, v); }
+  const o2Idx=this.schema.index.get('O2');
+  if (o2Idx!=null){
+    for (const key in this.dataTable){
+      const arr=this.dataTable[key];
+      const cur=arr[o2Idx];
+      if (cur){
+        const v=cur*decay;
+        if (v<0.01){
+          arr[o2Idx]=0;
+          let allZero=true;
+          for (let i=0;i<arr.length;i++){ if (arr[i]!==0){ allZero=false; break; } }
+          if (allZero) delete this.dataTable[key];
+        } else {
+          arr[o2Idx]=v;
+          maxO2=Math.max(maxO2, v);
+        }
+      }
     }
   }
   this._maxO2=maxO2;
