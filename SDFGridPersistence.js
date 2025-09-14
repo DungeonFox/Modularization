@@ -25,7 +25,9 @@ export function saveBlobs(){
             d:(p.d!=null?p.d:1),
             t:(p.t!=null?p.t:0)
           })) : [];
-          sparse.push({ x,y,z, particles, data });
+          const entry={ x,y,z, particles };
+          if (data) entry.data=Array.from(data);
+          sparse.push(entry);
         }
       }
     }
@@ -70,9 +72,20 @@ export function applyBlobs(blobs){
           time:p.t!=null?p.t:0
         }));
       }
-      if (data && typeof data==='object'){
-        const key=`${x},${y},${z}`; this.dataTable[key] = { ...data };
-        if (data.O2) this._maxO2 = Math.max(this._maxO2, data.O2);
+      if (data){
+        const arr=new Float32Array(this.schema.fieldNames.length);
+        if (Array.isArray(data)){
+          for(let i=0;i<Math.min(data.length, arr.length); i++) arr[i]=data[i]||0;
+        } else if (typeof data==='object'){
+          for (const [name,val] of Object.entries(data)){
+            const fi=this.schema.index.get(name);
+            if (fi!=null) arr[fi]=val;
+          }
+        }
+        const key=`${x},${y},${z}`;
+        this.dataTable[key] = arr;
+        const o2Idx=this.schema.index.get('O2');
+        if (o2Idx!=null && arr[o2Idx]) this._maxO2 = Math.max(this._maxO2, arr[o2Idx]);
       }
     }
   });
