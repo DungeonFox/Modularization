@@ -39,4 +39,7 @@ export async function _initBuckets(dir){
   }
 
   await this._ensureZeroTemplate();
+
+  // Persist any overlay data captured before buckets were initialized
+  if (this._dirtyLayers?.size) await this._flushDirtyLayers();
 }
