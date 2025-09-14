@@ -148,7 +148,7 @@ export async function setDenseFromCell(z, xCell, yCell, values){
     if (name==='O2') this._maxO2=Math.max(this._maxO2, v||0);
   }
   this._dirtyLayers.add(z|0);
-  if (!this._flushHandle) this._flushHandle=setTimeout(()=>this._flushDirtyLayers(), 200);
+  await this._flushDirtyLayers();
 }
 
 export async function addDenseFromCell(z, xCell, yCell, values){
@@ -164,7 +164,7 @@ export async function addDenseFromCell(z, xCell, yCell, values){
     if (name==='O2') this._maxO2=Math.max(this._maxO2, nxt);
   }
   this._dirtyLayers.add(z|0);
-  if (!this._flushHandle) this._flushHandle=setTimeout(()=>this._flushDirtyLayers(), 200);
+  await this._flushDirtyLayers();
 }
 
 export async function sampleDenseForCell(z, xCell, yCell, field){

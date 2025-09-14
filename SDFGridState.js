@@ -126,7 +126,7 @@ export async function updateGrid(params){
 
   this.visualizeGrid();
   this.saveState();
-  this.saveBlobs();
+  this.saveBlobs().catch(()=>{});
 }
 
 export function updatePosition(p){
@@ -184,7 +184,7 @@ export function setCellData(x,y,z,values,skipSave=false){
   for (let i=0;i<F;i++) obj[this.envVariables[i]] = cur[i] || 0;
   this.setDenseFromCell(z, x, y, obj).catch(()=>{});
 
-  if (!skipSave) this.saveBlobs();
+  if (!skipSave) this.saveBlobs().catch(()=>{});
   return true;
 }
 

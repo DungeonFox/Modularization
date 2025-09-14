@@ -10,7 +10,8 @@ export function saveLogic(){
   lsSet(logicKey(this.uid), payload);
 }
 
-export function saveBlobs(){
+export async function saveBlobs(){
+  if (this._dirtyLayers?.size) await this._flushDirtyLayers();
   const sparse=[];
   const handled=new Set();
 
