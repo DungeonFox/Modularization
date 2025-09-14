@@ -100,8 +100,12 @@ export async function updateGrid(params){
     const yi=Math.floor((cy - (this.position.y - this.state.gridHeight/2))/sYn);
     const zi=Math.floor((cz - (this.position.z - this.state.gridDepth/2))/sZn);
     if (xi>=0&&xi<this.state.cellsX && yi>=0&&yi<this.state.cellsY && zi>=0&&zi<this.effectiveCellsZ){
-      const d=this.getCellData(xi,yi,zi), cur=d?(d.O2||0):0;
-      this.setCellData(xi,yi,zi,{O2:cur}, true);
+      const d=this.getCellData(xi,yi,zi);
+      const idxO2=this.envVariables.indexOf('O2');
+      const cur=d ? d[idxO2] || 0 : 0;
+      const arr=new Array(this.envVariables.length).fill(0);
+      if (idxO2!==-1) arr[idxO2]=cur;
+      this.setCellData(xi,yi,zi,arr, true);
     }
   }
 
@@ -122,7 +126,7 @@ export async function updateGrid(params){
 
   this.visualizeGrid();
   this.saveState();
-  this.saveBlobs();
+  this.saveBlobs().catch(()=>{});
 }
 
 export function updatePosition(p){
@@ -151,21 +155,36 @@ export function zLayerIndexFromWorldZ(zWorld){
 export function getCellData(x,y,z){
   if (x<0||x>=this.state.cellsX||y<0||y>=this.state.cellsY||z<0||z>=this.effectiveCellsZ) return null;
   const key=`${x},${y},${z}`;
-  return this.dataTable[key] || this.envVariables.reduce((o,k)=>{o[k]=0; return o;}, {});
+  return this.dataTable[key] || new Array(this.envVariables.length).fill(0);
 }
 
 export function setCellData(x,y,z,values,skipSave=false){
   if (x<0||x>=this.state.cellsX||y<0||y>=this.state.cellsY||z<0||z>=this.effectiveCellsZ) return false;
   const key=`${x},${y},${z}`;
-  const cur=this.dataTable[key] || this.envVariables.reduce((o,k)=>{o[k]=0; return o;}, {});
-  const upd={...cur, ...values};
-  const allZero=this.envVariables.every(k => (upd[k]||0)===0);
+  const F=this.envVariables.length;
+  const cur=this.dataTable[key] ? this.dataTable[key].slice() : new Array(F).fill(0);
+  if (Array.isArray(values)){
+    for (let i=0;i<Math.min(F, values.length); i++) cur[i]=values[i];
+  } else {
+    for (let i=0;i<F;i++){
+      const name=this.envVariables[i];
+      const v=values[name];
+      if (v!=null) cur[i]=v;
+    }
+  }
+  const allZero=cur.every(v => (v||0)===0);
   if (allZero) delete this.dataTable[key];
   else {
-    this.dataTable[key]=upd;
-    if (upd.O2) this._maxO2=Math.max(this._maxO2, upd.O2);
+    this.dataTable[key]=cur;
+    const idxO2=this.envVariables.indexOf('O2');
+    if (idxO2!==-1 && cur[idxO2]) this._maxO2=Math.max(this._maxO2, cur[idxO2]);
   }
-  if (!skipSave) this.saveBlobs();
+
+  const obj={};
+  for (let i=0;i<F;i++) obj[this.envVariables[i]] = cur[i] || 0;
+  this.setDenseFromCell(z, x, y, obj).catch(()=>{});
+
+  if (!skipSave) this.saveBlobs().catch(()=>{});
   return true;
 }
 
@@ -174,15 +193,30 @@ export function updateDispersion(dt){
   if (now - this._lastDispersionUpdate < 1000) return;
   this._lastDispersionUpdate = now;
 
+  const idxO2=this.envVariables.indexOf('O2');
+  if (idxO2===-1) return;
   const decay=Math.exp(-this.decayRate);
   let maxO2=1;
+  const F=this.envVariables.length;
   for (const key in this.dataTable){
-    const d=this.dataTable[key];
-    if (d.O2){
-      const v=d.O2*decay;
-      if (v<0.01) delete this.dataTable[key];
-      else { this.dataTable[key].O2=v; maxO2=Math.max(maxO2, v); }
+    const arr=this.dataTable[key];
+    const val=arr[idxO2] || 0;
+    if (val){
+      const v=val*decay;
+      if (v<0.01){
+        arr[idxO2]=0;
+        const obj={}; for(let i=0;i<F;i++) obj[this.envVariables[i]] = arr[i] || 0;
+        const [x,y,z]=key.split(',').map(Number);
+        this.setDenseFromCell(z,x,y,obj).catch(()=>{});
+        delete this.dataTable[key];
+        continue;
+      } else {
+        arr[idxO2]=v; maxO2=Math.max(maxO2, v);
+      }
     }
+    const obj={}; for(let i=0;i<F;i++) obj[this.envVariables[i]] = arr[i] || 0;
+    const [x,y,z]=key.split(',').map(Number);
+    this.setDenseFromCell(z,x,y,obj).catch(()=>{});
   }
   this._maxO2=maxO2;
 }
