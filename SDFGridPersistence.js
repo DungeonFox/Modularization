@@ -12,20 +12,41 @@ export function saveLogic(){
 
 export function saveBlobs(){
   const sparse=[];
+  const handled=new Set();
+
+  // First collect cells that have environmental data
+  for (const key in this.dataTable){
+    if (!Object.prototype.hasOwnProperty.call(this.dataTable,key)) continue;
+    const [x,y,z]=key.split(',').map(Number);
+    const arr=this.dataTable[key];
+    const cell=(this.blobArray[z] && this.blobArray[z][y] && this.blobArray[z][y][x]) ? this.blobArray[z][y][x] : [];
+    const particles = cell.length ? cell.map(p=>({
+      o:[p.offset.x,p.offset.y,p.offset.z],
+      v:[p.velocity.x,p.velocity.y,p.velocity.z],
+      q:[p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w],
+      d:(p.d!=null?p.d:1),
+      t:(p.t!=null?p.t:0)
+    })) : [];
+    sparse.push({ x,y,z, particles, data: arr.slice() });
+    handled.add(key);
+  }
+
+  // Then collect cells that only contain particles
   for (let z=0; z<this.effectiveCellsZ; z++){
     for (let y=0; y<this.state.cellsY; y++){
       for (let x=0; x<this.state.cellsX; x++){
+        const key=`${x},${y},${z}`;
+        if (handled.has(key)) continue;
         const cell=(this.blobArray[z] && this.blobArray[z][y] && this.blobArray[z][y][x]) ? this.blobArray[z][y][x] : null;
-        const key=`${x},${y},${z}`; const data=this.dataTable[key];
-        if ((cell && cell.length) || (Array.isArray(data) && data.some(v=>v!==0))){
-          const particles = cell && cell.length ? cell.map(p=>({
+        if (cell && cell.length){
+          const particles = cell.map(p=>({
             o:[p.offset.x,p.offset.y,p.offset.z],
             v:[p.velocity.x,p.velocity.y,p.velocity.z],
             q:[p.orientation.x,p.orientation.y,p.orientation.z,p.orientation.w],
             d:(p.d!=null?p.d:1),
             t:(p.t!=null?p.t:0)
-          })) : [];
-          sparse.push({ x,y,z, particles, data: data ? data.slice() : undefined });
+          }));
+          sparse.push({ x,y,z, particles });
         }
       }
     }
