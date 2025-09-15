@@ -59,6 +59,24 @@ function _insertQuadrant(arr, qi, quad, F){
   }
 }
 
+async function _storeQuadrantWithVerify(ctx, layerKey, quadrantIndex, quad, retries=3){
+  if (!ctx?._db) return true;
+  const quadBytes=quad.byteLength;
+  const start=quad.byteOffset;
+  const end=start+quadBytes;
+  const key=`${layerKey},${quadrantIndex}`;
+  for(let attempt=0; attempt<retries; attempt++){
+    const payload=quad.buffer.slice(start, end);
+    await idbPut(ctx._db, STORE_LAYER, key, payload);
+    const stored=await idbGet(ctx._db, STORE_LAYER, key);
+    const storedBytes=(stored && typeof stored.byteLength==='number') ? stored.byteLength : 0;
+    if (storedBytes===quadBytes) return true;
+  }
+  const err=new Error(`Failed to persist quadrant ${key} after ${retries} attempts`);
+  console.warn(err);
+  throw err;
+}
+
 function _markDirty(ctx, z, bx, by){
   const qi=_quadrantIndex.call(ctx, bx, by);
   let set=ctx._dirtyLayers.get(z|0);
@@ -136,10 +154,10 @@ export async function _ensureDenseLayer(z){
     const tmpl=await this._ensureZeroTemplate();
     const arr=denseFromQuadrants(tmpl, targetSchema);
     await this._applySparseIntoDense(z, arr);
-    await Promise.all(Array.from({length:qCount},(_,i)=>{
+    for(let i=0;i<qCount;i++){
       const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-      return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-    }));
+      await _storeQuadrantWithVerify(this, key, i, quad);
+    }
     await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
     this._layerCache.set(key,arr); return arr;
   }
@@ -183,10 +201,10 @@ export async function _ensureDenseLayer(z){
     }
   }
 
-  await Promise.all(Array.from({length:qCount},(_,i)=>{
+  for(let i=0;i<qCount;i++){
     const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-    return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-  }));
+    await _storeQuadrantWithVerify(this, key, i, quad);
+  }
   await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
   this._layerCache.set(key,arr); return arr;
 }
@@ -273,12 +291,12 @@ export async function _flushDirtyLayers(){
     const arr=this._layerCache.get(z|0);
     if (!arr) return;
     const F=this.schema.fieldNames.length;
-    const writes=Array.from(set).map(qi=>{
+    const layerKey=z|0;
+    for (const qi of set){
       const quad=_sliceQuadrant.call(this, arr, qi, F);
-      return idbPut(this._db, STORE_LAYER, `${z},${qi}`, quad.buffer);
-    });
-    writes.push(idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames }));
-    await Promise.all(writes);
+      await _storeQuadrantWithVerify(this, layerKey, qi, quad);
+    }
+    await idbPut(this._db, STORE_LMETA, layerKey, { sid:this.schema.id, fields:this.schema.fieldNames });
   }));
   this._flushHandle=null;
 }
