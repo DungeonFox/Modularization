@@ -84,7 +84,7 @@ export async function updateGrid(params){
   { const w=this.state.cellsX,h=this.state.cellsY,dir=params?.propagationDir||{x:1,y:0}; const pick=()=>pickNucleusByDirection(w,h,dir); for(let z=0; z<this.effectiveCellsZ; z++) this._nuclei[z]=pick(); }
 
   this._layerCache.clear();
-  this._dirtyLayers.clear();
+  this._dirtyQuadrants.clear();
   if (this._flushHandle){ clearTimeout(this._flushHandle); this._flushHandle=null; }
 
   this.initializeGrid();
@@ -199,6 +199,6 @@ export function dispose(){
     this.gridGroup=null; this.instancedMesh=null;
   }
   this._layerCache.clear();
-  this._dirtyLayers.clear();
+  this._dirtyQuadrants.clear();
   this.constructor._instances?.delete(this.uid);
 }

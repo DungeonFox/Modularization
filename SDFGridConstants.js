@@ -13,4 +13,5 @@ export const STORE_LAYER = 'overlay_layers';
 export const STORE_LMETA = 'overlay_layers_meta';
 
 // Default number of quadrants for environment quantization
-export const DEFAULT_QUADRANT_COUNT = 10;
+// Adjusted to 16 so 1024×1024 layers divide evenly (4×4 grid)
+export const DEFAULT_QUADRANT_COUNT = 16;

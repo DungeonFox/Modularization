@@ -46,7 +46,7 @@ export async function updateParticles(particles, dt){
     const vals=Object.fromEntries(this.schema.fieldNames.map(n=>[n,inc]));
     await this.addDenseFromCell(c.z, c.x, c.y, vals);
   }
-  if (!this._flushHandle && this._dirtyLayers.size) this._flushHandle=setTimeout(()=>this._flushDirtyLayers(), 200);
+  if (!this._flushHandle && this._dirtyQuadrants.size) this._flushHandle=setTimeout(()=>this._flushDirtyLayers(), 200);
 
   this.updateDispersion(dt);
   if (this._disposed || this._rev!==rev) return;
