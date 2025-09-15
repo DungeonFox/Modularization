@@ -3,6 +3,15 @@ import { arraysEqual } from './SDFGridUtil.js';
 import { idbGet, idbPut } from './SDFGridStorage.js';
 import { createSparseQuadrants, denseFromQuadrants } from './SDFGridQuadrants.js';
 
+function _layerKey(z, qi){
+  return [z|0, qi|0];
+}
+
+async function _getLayerQuadrant(ctx, z, qi){
+  return await idbGet(ctx._db, STORE_LAYER, _layerKey(z, qi))
+      || await idbGet(ctx._db, STORE_LAYER, `${z},${qi}`);
+}
+
 function _quadrantLayout(count){
   const cols=Math.ceil(Math.sqrt(count));
   const rows=Math.ceil(count/cols);
@@ -68,13 +77,20 @@ function _markDirty(ctx, z, bx, by){
 
 export async function _ensureZeroTemplate(){
   const count = this.quadrantCount || DEFAULT_QUADRANT_COUNT;
-  if (!this._db) return createSparseQuadrants(count, this.envExpressions || []);
+  if (!this._db){
+    const tmpl=createSparseQuadrants(count, this.envExpressions || []);
+    this.quadrantCount = tmpl.quadrants.length;
+    this._quadLayout = _quadrantLayout(this.quadrantCount);
+    return tmpl;
+  }
   const key=`sid:${this.schema.id}`;
   let tmpl=await idbGet(this._db, STORE_BASEZ, key);
   if (!tmpl){
     tmpl=createSparseQuadrants(count, this.envExpressions || []);
     await idbPut(this._db, STORE_BASEZ, key, tmpl);
   }
+  this.quadrantCount = tmpl.quadrants.length;
+  this._quadLayout = _quadrantLayout(this.quadrantCount);
   return tmpl;
 }
 
@@ -130,7 +146,7 @@ export async function _ensureDenseLayer(z){
   }
 
   const lmeta=await idbGet(this._db, STORE_LMETA, key);
-  const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>idbGet(this._db, STORE_LAYER, `${key},${i}`)));
+  const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>_getLayerQuadrant(this, key, i)));
 
   if (buffers.every(b=>!b)){
     const tmpl=await this._ensureZeroTemplate();
@@ -138,7 +154,7 @@ export async function _ensureDenseLayer(z){
     await this._applySparseIntoDense(z, arr);
     await Promise.all(Array.from({length:qCount},(_,i)=>{
       const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-      return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
+      return idbPut(this._db, STORE_LAYER, _layerKey(key, i), quad.buffer);
     }));
     await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
     this._layerCache.set(key,arr); return arr;
@@ -185,7 +201,7 @@ export async function _ensureDenseLayer(z){
 
   await Promise.all(Array.from({length:qCount},(_,i)=>{
     const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-    return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
+    return idbPut(this._db, STORE_LAYER, _layerKey(key, i), quad.buffer);
   }));
   await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
   this._layerCache.set(key,arr); return arr;
@@ -275,7 +291,7 @@ export async function _flushDirtyLayers(){
     const F=this.schema.fieldNames.length;
     const writes=Array.from(set).map(qi=>{
       const quad=_sliceQuadrant.call(this, arr, qi, F);
-      return idbPut(this._db, STORE_LAYER, `${z},${qi}`, quad.buffer);
+      return idbPut(this._db, STORE_LAYER, _layerKey(z, qi), quad.buffer);
     });
     writes.push(idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames }));
     await Promise.all(writes);
