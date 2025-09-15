@@ -32,8 +32,8 @@ import { compileLogic } from './SDFGridLogic.js';
 import { createInterpolatedShapes, sdf, sdfGrad } from './SDFGridShape.js';
 import { DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
 import {
-  _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _denseIdx, _ensureDenseLayer,
-  _mapCellToDense, _applySparseIntoDense, setDenseFromCell, addDenseFromCell,
+  _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _denseIdx, _ensureQuadrantLayer,
+  _ensureDenseLayer, _mapCellToDense, setDenseFromCell, addDenseFromCell,
   sampleDenseForCell, _flushDirtyLayers
 } from './SDFGridLayers.js';
 import { updateParticles } from './SDFGridParticles.js';
@@ -45,6 +45,7 @@ import {
   zLayerIndexFromWorldZ, getCellData, setCellData, updateDispersion, setVisible, dispose
 } from './SDFGridState.js';
 import { layerInfo, readCell, centerCell } from './SDFGridConsole.js';
+import { envExpressionFromModule, parseEnvExpression } from './SDFGridEnvExpressions.js';
 
 export class SDFGrid{
   constructor(uid, scene, params){
@@ -67,7 +68,20 @@ export class SDFGrid{
     // legacy sparse backing
     this.blobArray = [];
     this.dataTable = {};
-    this.envVariables = params.envVariables || ['O2','CO2','H2O'];
+    this.envModules = params.envModules || [];
+    if (this.envModules.length){
+      this.envExpressions = this.envModules.map(envExpressionFromModule);
+      const vars = new Set();
+      for (const expr of this.envExpressions){
+        const obj = parseEnvExpression(expr);
+        for (const k of Object.keys(obj)) vars.add(k);
+      }
+      this.envVariables = Array.from(vars);
+    } else {
+      this.envVariables = params.envVariables || ['O2','CO2','H2O'];
+      const tmpl = Object.fromEntries(this.envVariables.map(n=>[n,0]));
+      this.envExpressions = [envExpressionFromModule(tmpl)];
+    }
     this.quadrantCount = params?.quadrantCount || DEFAULT_QUADRANT_COUNT;
 
     // svg
@@ -88,8 +102,9 @@ export class SDFGrid{
     this.fieldForViz = params.fieldForViz || (initialFields.includes('O2') ? 'O2' : initialFields[0]);
 
     // caches and batching
-    this._layerCache = new Map(); // z -> Float32Array (dense)
-    this._dirtyLayers = new Set();
+    this._layerCache = new Map(); // z -> Float32Array (dense composite)
+    this._quadrantCache = new Map(); // `z:q` -> Float32Array
+    this._dirtyQuadrants = new Set();
     this._flushHandle = null;
 
     // stats
@@ -150,9 +165,9 @@ Object.assign(SDFGrid.prototype, {
   _ensureBaseSDF,
   getBaseDistance,
   _denseIdx,
+  _ensureQuadrantLayer,
   _ensureDenseLayer,
   _mapCellToDense,
-  _applySparseIntoDense,
   setDenseFromCell,
   addDenseFromCell,
   sampleDenseForCell,
