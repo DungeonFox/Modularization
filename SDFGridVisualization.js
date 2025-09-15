@@ -106,8 +106,13 @@ export async function updateVisualization(){
   for (const [key,id] of im.instanceMap){
     const [x,y,z]=key.split(',').map(Number);
     const { bx, by } = this._mapCellToDense(z, x, y);
-    const arr=this._layerCache.get(z|0);
-    const val = arr ? (arr[this._denseIdx(F,bx,by,fi)] || 0) : 0;
+    const layer=this._layerCache.get(z|0);
+    let val=0;
+    if (layer){
+      const { qi, qx, qy } = this._mapDenseToQuadrant(layer, bx, by);
+      const arr=layer.quads[qi];
+      if (arr) val = arr[((qy*layer.qW)+qx)*F + fi] || 0;
+    }
     const norm=Math.min(1,(val<=0?0:val)/max);
     im.setColorAt(id, this._valueToColor(norm));
   }
