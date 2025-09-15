@@ -66,6 +66,28 @@ function _markDirty(ctx, z, bx, by){
   set.add(qi);
 }
 
+function _enqueueLayerTask(ctx, z, fn){
+  ctx._layerTasks ||= new Map();
+  const key=z|0;
+  const prev=ctx._layerTasks.get(key) || Promise.resolve();
+  const next=prev.then(fn);
+  ctx._layerTasks.set(key, next.catch(()=>{}));
+  return next;
+}
+
+async function _persistQuadrantWithRetry(ctx, z, qi, arr, F, retries=1){
+  if (!ctx._db) return;
+  const keyStr = `${z},${qi}`;
+  let attempt = 0;
+  while (attempt <= retries){
+    const quad = _sliceQuadrant.call(ctx, arr, qi, F);
+    await idbPut(ctx._db, STORE_LAYER, keyStr, quad.buffer);
+    const check = await idbGet(ctx._db, STORE_LAYER, keyStr);
+    if (check) return;
+    attempt++;
+  }
+}
+
 export async function _ensureZeroTemplate(){
   const count = this.quadrantCount || DEFAULT_QUADRANT_COUNT;
   if (!this._db) return createSparseQuadrants(count, this.envExpressions || []);
@@ -121,7 +143,18 @@ export async function _ensureDenseLayer(z){
 
   const targetSchema=this.schema;
   const Fnew=targetSchema.fieldNames.length;
-  const qCount=this.quadrantCount || DEFAULT_QUADRANT_COUNT;
+
+  // Ensure quadrant count matches the base_zero template so layer
+  // quadrants align with the sparse environment template.  This fixes
+  // situations where the configured quadrantCount differs from what was
+  // persisted in base_zero, leading to missing or misordered layer
+  // quadrant keys.
+  const zeroTmpl = await this._ensureZeroTemplate();
+  const qCount = zeroTmpl.quadrants.length;
+  if (this.quadrantCount !== qCount){
+    this.quadrantCount = qCount;
+    this._quadLayout = null; // force recomputation with new count
+  }
   _ensureLayout(this);
 
   if (!this._db){
@@ -130,64 +163,75 @@ export async function _ensureDenseLayer(z){
   }
 
   const lmeta=await idbGet(this._db, STORE_LMETA, key);
-  const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>idbGet(this._db, STORE_LAYER, `${key},${i}`)));
-
-  if (buffers.every(b=>!b)){
-    const tmpl=await this._ensureZeroTemplate();
-    const arr=denseFromQuadrants(tmpl, targetSchema);
-    await this._applySparseIntoDense(z, arr);
-    await Promise.all(Array.from({length:qCount},(_,i)=>{
-      const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-      return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-    }));
-    await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
-    this._layerCache.set(key,arr); return arr;
-  }
-
   const curSid=lmeta?.sid|0;
   const curList=lmeta?.fields || [];
-  if (curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames)){
-    const arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
+  const schemaMatches = curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames);
+  const Fold=curList.length;
+  const oldIdx=new Map(curList.map((n,i)=>[n,i]));
+
+  let arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
+  const missing=[];
+  let anyFound=false;
+
+  for (let qi=0; qi<qCount; qi++){
+    const buf = await idbGet(this._db, STORE_LAYER, `${key},${qi}`);
+    if (buf){
+      anyFound = true;
+      const quadOld = new Float32Array(buf);
+      if (schemaMatches){
+        _insertQuadrant.call(this, arr, qi, quadOld, Fnew);
+      } else {
+        const { cols, qW, qH } = this._quadLayout;
+        const col=qi%cols, row=Math.floor(qi/cols);
+        const xStart=col*qW, yStart=row*qH;
+        const xEnd=Math.min(xStart+qW, DENSE_W);
+        const yEnd=Math.min(yStart+qH, DENSE_H);
+        let idx=0;
+        for(let y=yStart;y<yEnd;y++){
+          const rowBase=y*DENSE_W*Fnew;
+          for(let x=xStart;x<xEnd;x++){
+            const baseNew=rowBase + x*Fnew;
+            const baseOld=idx*Fold;
+            for (const [name, fiNew] of targetSchema.index){
+              const fiOld=oldIdx.get(name);
+              if (fiOld!=null) arr[baseNew+fiNew]=quadOld[baseOld+fiOld];
+            }
+            idx++;
+          }
+        }
+      }
+    } else {
+      missing.push(qi);
+    }
+  }
+
+  if (!anyFound){
+    arr = denseFromQuadrants(zeroTmpl, targetSchema);
+    await this._applySparseIntoDense(z, arr);
     for(let i=0;i<qCount;i++){
-      const buf=buffers[i]; if(!buf) continue;
-      _insertQuadrant.call(this, arr, i, new Float32Array(buf), Fnew);
+      await _enqueueLayerTask(this, key, ()=>_persistQuadrantWithRetry(this, key, i, arr, Fnew));
+    }
+    await _enqueueLayerTask(this, key, async()=>{
+      await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
+    });
+    this._layerCache.set(key,arr); return arr;
+  }
+
+  if (schemaMatches){
+    if (missing.length){
+      for (const i of missing){
+        await _enqueueLayerTask(this, key, ()=>_persistQuadrantWithRetry(this, key, i, arr, Fnew));
+      }
     }
     this._layerCache.set(key,arr); return arr;
   }
 
-  const Fold=curList.length;
-  const oldIdx=new Map(curList.map((n,i)=>[n,i]));
-  const arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
-
-  for(let qi=0; qi<qCount; qi++){
-    const buf=buffers[qi]; if(!buf) continue;
-    const quadOld=new Float32Array(buf);
-    const { cols, qW, qH } = this._quadLayout;
-    const col=qi%cols, row=Math.floor(qi/cols);
-    const xStart=col*qW, yStart=row*qH;
-    const xEnd=Math.min(xStart+qW, DENSE_W);
-    const yEnd=Math.min(yStart+qH, DENSE_H);
-    const qw=xEnd-xStart;
-    let idx=0;
-    for(let y=yStart;y<yEnd;y++){
-      const rowBase=y*DENSE_W*Fnew;
-      for(let x=xStart;x<xEnd;x++){
-        const baseNew=rowBase + x*Fnew;
-        const baseOld=idx*Fold;
-        for (const [name, fiNew] of targetSchema.index){
-          const fiOld=oldIdx.get(name);
-          if (fiOld!=null) arr[baseNew+fiNew]=quadOld[baseOld+fiOld];
-        }
-        idx++;
-      }
-    }
+  for(let i=0;i<qCount;i++){
+    await _enqueueLayerTask(this, key, ()=>_persistQuadrantWithRetry(this, key, i, arr, Fnew));
   }
-
-  await Promise.all(Array.from({length:qCount},(_,i)=>{
-    const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-    return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-  }));
-  await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
+  await _enqueueLayerTask(this, key, async()=>{
+    await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
+  });
   this._layerCache.set(key,arr); return arr;
 }
 
@@ -273,12 +317,13 @@ export async function _flushDirtyLayers(){
     const arr=this._layerCache.get(z|0);
     if (!arr) return;
     const F=this.schema.fieldNames.length;
-    const writes=Array.from(set).map(qi=>{
-      const quad=_sliceQuadrant.call(this, arr, qi, F);
-      return idbPut(this._db, STORE_LAYER, `${z},${qi}`, quad.buffer);
+    const ordered=Array.from(set).sort((a,b)=>a-b);
+    for (const qi of ordered){
+      await _enqueueLayerTask(this, z, ()=>_persistQuadrantWithRetry(this, z, qi, arr, F));
+    }
+    await _enqueueLayerTask(this, z, async()=>{
+      await idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames });
     });
-    writes.push(idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames }));
-    await Promise.all(writes);
   }));
   this._flushHandle=null;
 }
