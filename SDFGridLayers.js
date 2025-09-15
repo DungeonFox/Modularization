@@ -16,11 +16,49 @@ function _ensureLayout(ctx){
   return ctx._quadLayout;
 }
 
+function _applyQuadrantCount(ctx, count){
+  const desired = Number.isFinite(count) && count > 0
+    ? Math.floor(count)
+    : DEFAULT_QUADRANT_COUNT;
+  if (ctx.quadrantCount !== desired){
+    ctx.quadrantCount = desired;
+    ctx._quadLayout = _quadrantLayout(desired);
+  } else if (!ctx._quadLayout){
+    ctx._quadLayout = _quadrantLayout(desired);
+  }
+  return desired;
+}
+
 function _quadrantIndex(bx, by){
   const { cols, qW, qH } = _ensureLayout(this);
   const col=Math.floor(bx / qW);
   const row=Math.floor(by / qH);
   return row*cols + col;
+}
+
+async function _storeQuadrantWithVerify(ctx, layerKey, qi, quad, retries = 2){
+  if (!ctx._db) return true;
+  const key = `${layerKey},${qi}`;
+  const expected = quad.byteLength;
+  for (let attempt=0; attempt<=retries; attempt++){
+    const view = quad.buffer.slice(quad.byteOffset, quad.byteOffset + quad.byteLength);
+    await idbPut(ctx._db, STORE_LAYER, key, view);
+    const verify = await idbGet(ctx._db, STORE_LAYER, key);
+    if (verify && verify.byteLength === expected) return true;
+  }
+  if (typeof console !== 'undefined' && console.warn){
+    console.warn(`SDFGrid: failed to persist quadrant ${key} after ${retries+1} attempts`);
+  }
+  return false;
+}
+
+async function _persistQuadrantsSequential(ctx, layerKey, arr, F, qCount, indices){
+  if (!ctx._db || !qCount) return;
+  const list = indices && indices.length ? [...indices].sort((a,b)=>a-b) : Array.from({length:qCount},(_,i)=>i);
+  for (const qi of list){
+    const quad=_sliceQuadrant.call(ctx, arr, qi, F);
+    await _storeQuadrantWithVerify(ctx, layerKey, qi, quad);
+  }
 }
 
 function _sliceQuadrant(arr, qi, F){
@@ -67,14 +105,29 @@ function _markDirty(ctx, z, bx, by){
 }
 
 export async function _ensureZeroTemplate(){
-  const count = this.quadrantCount || DEFAULT_QUADRANT_COUNT;
-  if (!this._db) return createSparseQuadrants(count, this.envExpressions || []);
-  const key=`sid:${this.schema.id}`;
-  let tmpl=await idbGet(this._db, STORE_BASEZ, key);
-  if (!tmpl){
-    tmpl=createSparseQuadrants(count, this.envExpressions || []);
-    await idbPut(this._db, STORE_BASEZ, key, tmpl);
+  const desired = this.quadrantCount || DEFAULT_QUADRANT_COUNT;
+  if (this._zeroTemplate && this._zeroTemplateSid === this.schema.id){
+    const cachedCount = Array.isArray(this._zeroTemplate.quadrants) ? this._zeroTemplate.quadrants.length : desired;
+    _applyQuadrantCount(this, cachedCount);
+    return this._zeroTemplate;
   }
+
+  let tmpl;
+  if (!this._db){
+    tmpl = createSparseQuadrants(desired, this.envExpressions || []);
+  } else {
+    const key=`sid:${this.schema.id}`;
+    tmpl = await idbGet(this._db, STORE_BASEZ, key);
+    if (!tmpl){
+      tmpl = createSparseQuadrants(desired, this.envExpressions || []);
+      await idbPut(this._db, STORE_BASEZ, key, tmpl);
+    }
+  }
+
+  const qCount = Array.isArray(tmpl?.quadrants) ? tmpl.quadrants.length : desired;
+  _applyQuadrantCount(this, qCount);
+  this._zeroTemplate = tmpl;
+  this._zeroTemplateSid = this.schema.id;
   return tmpl;
 }
 
@@ -121,7 +174,9 @@ export async function _ensureDenseLayer(z){
 
   const targetSchema=this.schema;
   const Fnew=targetSchema.fieldNames.length;
-  const qCount=this.quadrantCount || DEFAULT_QUADRANT_COUNT;
+  const tmpl=await this._ensureZeroTemplate();
+  const templateQuadrants=tmpl?.quadrants || [];
+  const qCount=this.quadrantCount || templateQuadrants.length || DEFAULT_QUADRANT_COUNT;
   _ensureLayout(this);
 
   if (!this._db){
@@ -130,64 +185,80 @@ export async function _ensureDenseLayer(z){
   }
 
   const lmeta=await idbGet(this._db, STORE_LMETA, key);
-  const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>idbGet(this._db, STORE_LAYER, `${key},${i}`)));
+  const buffers=new Array(qCount);
+  const missing=[];
+  for (let qi=0; qi<qCount; qi++){
+    const buf=await idbGet(this._db, STORE_LAYER, `${key},${qi}`);
+    if (buf){
+      buffers[qi]=buf;
+    } else {
+      buffers[qi]=null;
+      missing.push(qi);
+    }
+  }
 
   if (buffers.every(b=>!b)){
-    const tmpl=await this._ensureZeroTemplate();
     const arr=denseFromQuadrants(tmpl, targetSchema);
     await this._applySparseIntoDense(z, arr);
-    await Promise.all(Array.from({length:qCount},(_,i)=>{
-      const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-      return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-    }));
+    await _persistQuadrantsSequential(this, key, arr, Fnew, qCount);
     await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
     this._layerCache.set(key,arr); return arr;
   }
 
   const curSid=lmeta?.sid|0;
   const curList=lmeta?.fields || [];
-  if (curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames)){
-    const arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
-    for(let i=0;i<qCount;i++){
-      const buf=buffers[i]; if(!buf) continue;
-      _insertQuadrant.call(this, arr, i, new Float32Array(buf), Fnew);
+  const sameSchema = curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames);
+
+  let arr;
+  let targets=null;
+
+  if (sameSchema){
+    arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
+    for(let qi=0; qi<qCount; qi++){
+      const buf=buffers[qi]; if(!buf) continue;
+      _insertQuadrant.call(this, arr, qi, new Float32Array(buf), Fnew);
     }
-    this._layerCache.set(key,arr); return arr;
-  }
-
-  const Fold=curList.length;
-  const oldIdx=new Map(curList.map((n,i)=>[n,i]));
-  const arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
-
-  for(let qi=0; qi<qCount; qi++){
-    const buf=buffers[qi]; if(!buf) continue;
-    const quadOld=new Float32Array(buf);
-    const { cols, qW, qH } = this._quadLayout;
-    const col=qi%cols, row=Math.floor(qi/cols);
-    const xStart=col*qW, yStart=row*qH;
-    const xEnd=Math.min(xStart+qW, DENSE_W);
-    const yEnd=Math.min(yStart+qH, DENSE_H);
-    const qw=xEnd-xStart;
-    let idx=0;
-    for(let y=yStart;y<yEnd;y++){
-      const rowBase=y*DENSE_W*Fnew;
-      for(let x=xStart;x<xEnd;x++){
-        const baseNew=rowBase + x*Fnew;
-        const baseOld=idx*Fold;
-        for (const [name, fiNew] of targetSchema.index){
-          const fiOld=oldIdx.get(name);
-          if (fiOld!=null) arr[baseNew+fiNew]=quadOld[baseOld+fiOld];
+    targets = missing.length ? missing : null;
+  } else {
+    const Fold=curList.length;
+    const oldIdx=new Map(curList.map((n,i)=>[n,i]));
+    arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
+    if (Fold){
+      for(let qi=0; qi<qCount; qi++){
+        const buf=buffers[qi]; if(!buf) continue;
+        const quadOld=new Float32Array(buf);
+        const { cols, qW, qH } = this._quadLayout;
+        const col=qi%cols, row=Math.floor(qi/cols);
+        const xStart=col*qW, yStart=row*qH;
+        const xEnd=Math.min(xStart+qW, DENSE_W);
+        const yEnd=Math.min(yStart+qH, DENSE_H);
+        const qw=xEnd-xStart;
+        let idx=0;
+        for(let y=yStart;y<yEnd;y++){
+          const rowBase=y*DENSE_W*Fnew;
+          for(let x=xStart;x<xEnd;x++){
+            const baseNew=rowBase + x*Fnew;
+            const baseOld=idx*Fold;
+            for (const [name, fiNew] of targetSchema.index){
+              const fiOld=oldIdx.get(name);
+              if (fiOld!=null) arr[baseNew+fiNew]=quadOld[baseOld+fiOld];
+            }
+            idx++;
+          }
         }
-        idx++;
       }
     }
+    targets = Array.from({length:qCount},(_,i)=>i);
   }
 
-  await Promise.all(Array.from({length:qCount},(_,i)=>{
-    const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-    return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-  }));
-  await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
+  if (targets && targets.length){
+    await _persistQuadrantsSequential(this, key, arr, Fnew, qCount, targets);
+  }
+
+  if (!sameSchema){
+    await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
+  }
+
   this._layerCache.set(key,arr); return arr;
 }
 
@@ -269,17 +340,18 @@ export async function _flushDirtyLayers(){
   const entries=Array.from(this._dirtyLayers.entries());
   this._dirtyLayers.clear();
   _ensureLayout(this);
-  await Promise.all(entries.map(async ([z,set])=>{
-    const arr=this._layerCache.get(z|0);
-    if (!arr) return;
+  for (const [z,set] of entries){
+    const layerKey = z|0;
+    const arr=this._layerCache.get(layerKey);
+    if (!arr) continue;
     const F=this.schema.fieldNames.length;
-    const writes=Array.from(set).map(qi=>{
+    const ordered=Array.from(set).sort((a,b)=>a-b);
+    for (const qi of ordered){
       const quad=_sliceQuadrant.call(this, arr, qi, F);
-      return idbPut(this._db, STORE_LAYER, `${z},${qi}`, quad.buffer);
-    });
-    writes.push(idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames }));
-    await Promise.all(writes);
-  }));
+      await _storeQuadrantWithVerify(this, layerKey, qi, quad);
+    }
+    await idbPut(this._db, STORE_LMETA, layerKey, { sid:this.schema.id, fields:this.schema.fieldNames });
+  }
   this._flushHandle=null;
 }
 
