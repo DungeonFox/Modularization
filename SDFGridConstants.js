@@ -13,4 +13,5 @@ export const STORE_LAYER = 'overlay_layers';
 export const STORE_LMETA = 'overlay_layers_meta';
 
 // Default number of quadrants for environment quantization
-export const DEFAULT_QUADRANT_COUNT = 10;
+// Use 16 to evenly divide the 1024×1024 dense layer into 256×256 quadrants
+export const DEFAULT_QUADRANT_COUNT = 16;
