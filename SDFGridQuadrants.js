@@ -67,3 +67,73 @@ export function denseFromQuadrants(template, schema){
   }
   return arr;
 }
+
+// Compute layout information for a given quadrant count
+function _layout(count){
+  const cols = Math.ceil(Math.sqrt(count));
+  const rows = Math.ceil(count / cols);
+  const qW = Math.ceil(DENSE_W / cols);
+  const qH = Math.ceil(DENSE_H / rows);
+  return { cols, rows, qW, qH };
+}
+
+// Determine which quadrant a pixel coordinate belongs to
+export function quadrantIndexForPixel(x, y, count){
+  const { cols, rows, qW, qH } = _layout(count);
+  const col = Math.min(cols - 1, Math.floor(x / qW));
+  const row = Math.min(rows - 1, Math.floor(y / qH));
+  return row * cols + col;
+}
+
+// Extract a single quadrant buffer from a dense layer
+export function extractQuadrantBuffer(arr, qIndex, count, F){
+  const { cols, qW, qH } = _layout(count);
+  const col = qIndex % cols;
+  const row = Math.floor(qIndex / cols);
+  const xStart = col * qW;
+  const yStart = row * qH;
+  const xEnd = Math.min(xStart + qW, DENSE_W);
+  const yEnd = Math.min(yStart + qH, DENSE_H);
+  const w = xEnd - xStart;
+  const h = yEnd - yStart;
+  const out = new Float32Array(w * h * F);
+  let p = 0;
+  for (let y = yStart; y < yEnd; y++){
+    const rowBase = y * DENSE_W * F;
+    for (let x = xStart; x < xEnd; x++){
+      const base = rowBase + x * F;
+      for (let fi = 0; fi < F; fi++) out[p++] = arr[base + fi];
+    }
+  }
+  return out.buffer;
+}
+
+// Apply a quadrant buffer back into a dense layer
+export function applyQuadrantBuffer(arr, qIndex, count, F, buffer){
+  const quad = new Float32Array(buffer);
+  const { cols, qW, qH } = _layout(count);
+  const col = qIndex % cols;
+  const row = Math.floor(qIndex / cols);
+  const xStart = col * qW;
+  const yStart = row * qH;
+  const xEnd = Math.min(xStart + qW, DENSE_W);
+  const yEnd = Math.min(yStart + qH, DENSE_H);
+  let p = 0;
+  for (let y = yStart; y < yEnd; y++){
+    const rowBase = y * DENSE_W * F;
+    for (let x = xStart; x < xEnd; x++){
+      const base = rowBase + x * F;
+      for (let fi = 0; fi < F; fi++) arr[base + fi] = quad[p++];
+    }
+  }
+}
+
+// Reconstruct a dense layer from multiple quadrant buffers
+export function buffersToDense(buffers, count, F){
+  const arr = new Float32Array(DENSE_W * DENSE_H * F);
+  for (let i = 0; i < count; i++){
+    const buf = buffers[i];
+    if (buf) applyQuadrantBuffer(arr, i, count, F, buf);
+  }
+  return arr;
+}
