@@ -68,6 +68,7 @@ export class SDFGrid{
     this.blobArray = [];
     this.dataTable = {};
     this.envVariables = params.envVariables || ['O2','CO2','H2O'];
+    this.envTemplate  = Object.fromEntries(this.envVariables.map(n=>[n,0]));
     this.quadrantCount = params?.quadrantCount || DEFAULT_QUADRANT_COUNT;
 
     // svg

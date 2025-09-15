@@ -14,11 +14,14 @@ export function quantizePareto(env){
   return out;
 }
 
-// Create a sparse quadrant template, quantizing each quadrant's environment variables
+// Create a sparse quadrant template with each environment variable defaulting to zero
 export function createSparseQuadrants(count = DEFAULT_QUADRANT_COUNT, envTemplate = {}){
+  const keys = Object.keys(envTemplate);
   const quads = [];
   for (let i=0; i<count; i++){
-    quads.push(quantizePareto(envTemplate));
+    const q = {};
+    for (const k of keys) q[k] = 0;
+    quads.push(q);
   }
   return { quadrants: quads };
 }
