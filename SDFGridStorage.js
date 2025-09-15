@@ -35,3 +35,10 @@ export function idbPut(db,store,key,val){
     const rq=st.put(val,key); rq.onsuccess=()=>res(true); rq.onerror=()=>rej(rq.error);
   });
 }
+
+export function idbDelete(db,store,key){
+  return new Promise((res,rej)=>{
+    const tx=db.transaction(store,'readwrite'), st=tx.objectStore(store);
+    const rq=st.delete(key); rq.onsuccess=()=>res(true); rq.onerror=()=>rej(rq.error);
+  });
+}
