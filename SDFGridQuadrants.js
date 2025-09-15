@@ -1,4 +1,5 @@
 import { DENSE_W, DENSE_H, DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
+import { parseEnvExpression } from './SDFGridEnvExpressions.js';
 
 // Quantize environment variables using the Pareto principle (top 20% retained)
 export function quantizePareto(env){
@@ -14,11 +15,17 @@ export function quantizePareto(env){
   return out;
 }
 
-// Create a sparse quadrant template, quantizing each quadrant's environment variables
-export function createSparseQuadrants(count = DEFAULT_QUADRANT_COUNT, envTemplate = {}){
+// Create sparse quadrants from serialized environment expressions
+// Each expression resolves to an object whose keys become the quadrant variables
+// with zero as the default value. Expressions can differ per quadrant.
+export function createSparseQuadrants(count = DEFAULT_QUADRANT_COUNT, envExprs = []){
   const quads = [];
   for (let i=0; i<count; i++){
-    quads.push(quantizePareto(envTemplate));
+    const expr = envExprs[i] ?? envExprs[0] ?? {};
+    const tmpl = parseEnvExpression(expr);
+    const q = {};
+    for (const k of Object.keys(tmpl)) q[k] = 0;
+    quads.push(q);
   }
   return { quadrants: quads };
 }
@@ -27,19 +34,34 @@ export function createSparseQuadrants(count = DEFAULT_QUADRANT_COUNT, envTemplat
 export function denseFromQuadrants(template, schema){
   const F = schema.fieldNames.length;
   const arr = new Float32Array(DENSE_W * DENSE_H * F);
-  if (!template?.quadrants || !template.quadrants.length) return arr;
-  const totalPixels = DENSE_W * DENSE_H;
-  const qCount = template.quadrants.length;
-  const areaPerQ = Math.ceil(totalPixels / qCount);
-  let pix = 0;
-  for (const quad of template.quadrants){
+  const quads = template?.quadrants || [];
+  const qCount = quads.length;
+  if (!qCount) return arr;
+
+  // Lay out quadrants across the 1024×1024 layer in a near-square grid
+  const cols = Math.ceil(Math.sqrt(qCount));
+  const rows = Math.ceil(qCount / cols);
+  const qW = Math.ceil(DENSE_W / cols);
+  const qH = Math.ceil(DENSE_H / rows);
+
+  for (let i=0; i<qCount; i++){
+    const quad = quads[i];
     const entries = Object.entries(quad);
-    const end = Math.min(pix + areaPerQ, totalPixels);
-    for (; pix < end; pix++){
-      const base = pix * F;
-      for (const [name, val] of entries){
-        const fi = schema.index.get(name);
-        if (fi != null) arr[base + fi] = val;
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const xStart = col * qW;
+    const yStart = row * qH;
+    const xEnd = Math.min(xStart + qW, DENSE_W);
+    const yEnd = Math.min(yStart + qH, DENSE_H);
+
+    for (let y=yStart; y<yEnd; y++){
+      const rowBase = y * DENSE_W * F;
+      for (let x=xStart; x<xEnd; x++){
+        const base = rowBase + x * F;
+        for (const [name, val] of entries){
+          const fi = schema.index.get(name);
+          if (fi != null) arr[base + fi] = val;
+        }
       }
     }
   }
