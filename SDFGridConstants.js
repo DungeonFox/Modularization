@@ -12,5 +12,6 @@ export const STORE_BASEZ = 'base_zero';
 export const STORE_LAYER = 'overlay_layers';
 export const STORE_LMETA = 'overlay_layers_meta';
 
-// Default number of quadrants for environment quantization
-export const DEFAULT_QUADRANT_COUNT = 10;
+// Default number of quadrants for environment quantization and layer storage
+// A 1024×1024 dense layer is divided into 16 quadrants of 256×256 (65,536 cells each)
+export const DEFAULT_QUADRANT_COUNT = 16;
