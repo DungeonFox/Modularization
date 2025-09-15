@@ -6,7 +6,7 @@
 // and applies any existing sparse cell data center-aligned; zeros remain as padding.
 //
 // IDB inside a Storage Bucket named after UID (lowercased, sanitized):
-//   DB: 'SDFFieldDB'  (version 7)
+//   DB: 'SDFFieldDB'  (version 8)
 //   Stores:
 //     'meta'                : layout, global schema, per-layer nuclei
 //       - 'layout'          : { w,h,layers, denseW,denseH, shapeType, gw,gh,gd }
@@ -15,7 +15,7 @@
 //     'base'                : per-layer Int16 SDF (key = z)    [kept for SDF usage]
 //     'base_zero'           : sparse quadrant templates        [NEW]
 //         key = `sid:${schemaId}`  -> { quadrants: Array }
-//     'overlay_layers'      : per-layer Float32 dense, key = z
+//     'overlay_quadrants'   : per-layer Float32 dense pieces, key = `${z},${qi}`
 //     'overlay_layers_meta' : per-layer schema version { sid, fields }, key = z
 //
 // Console helpers exposed: SDF_layerInfo(uid,z), SDF_readCell(uid,z,x,y), SDF_centerCell(uid,z)
@@ -103,7 +103,7 @@ export class SDFGrid{
 
     // caches and batching
     this._layerCache = new Map(); // z -> Float32Array (dense)
-    this._dirtyLayers = new Set();
+    this._dirtyQuadrants = new Map(); // z -> Set of dirty quadrant indices
     this._flushHandle = null;
 
     // stats

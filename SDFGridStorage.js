@@ -1,5 +1,5 @@
 // IndexedDB and Storage Bucket helpers for SDFGrid
-import { IDB_NAME, IDB_VERSION, STORE_META, STORE_BASE, STORE_LAYER, STORE_LMETA, STORE_BASEZ } from './SDFGridConstants.js';
+import { IDB_NAME, IDB_VERSION, STORE_META, STORE_BASE, STORE_LAYER_Q, STORE_LMETA, STORE_BASEZ } from './SDFGridConstants.js';
 
 export async function openBucketLC(nameLC){
   if (!nameLC || !navigator.storageBuckets) return null;
@@ -13,7 +13,7 @@ export function openFieldDB(bucket){
       const db=e.target.result;
       if (!db.objectStoreNames.contains(STORE_META))  db.createObjectStore(STORE_META);
       if (!db.objectStoreNames.contains(STORE_BASE))  db.createObjectStore(STORE_BASE);
-      if (!db.objectStoreNames.contains(STORE_LAYER)) db.createObjectStore(STORE_LAYER);
+      if (!db.objectStoreNames.contains(STORE_LAYER_Q)) db.createObjectStore(STORE_LAYER_Q);
       if (!db.objectStoreNames.contains(STORE_LMETA)) db.createObjectStore(STORE_LMETA);
       if (!db.objectStoreNames.contains(STORE_BASEZ)) db.createObjectStore(STORE_BASEZ);
     };
