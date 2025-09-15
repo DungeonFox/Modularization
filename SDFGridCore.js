@@ -15,7 +15,7 @@
 //     'base'                : per-layer Int16 SDF (key = z)    [kept for SDF usage]
 //     'base_zero'           : sparse quadrant templates        [NEW]
 //         key = `sid:${schemaId}`  -> { quadrants: Array }
-//     'overlay_layers'      : per-layer Float32 dense, key = z
+//     'overlay_layers'      : per-quadrant Float32 dense, key = `z:q`
 //     'overlay_layers_meta' : per-layer schema version { sid, fields }, key = z
 //
 // Console helpers exposed: SDF_layerInfo(uid,z), SDF_readCell(uid,z,x,y), SDF_centerCell(uid,z)
@@ -45,6 +45,7 @@ import {
   zLayerIndexFromWorldZ, getCellData, setCellData, updateDispersion, setVisible, dispose
 } from './SDFGridState.js';
 import { layerInfo, readCell, centerCell } from './SDFGridConsole.js';
+import { envExpressionFromModule, parseEnvExpression } from './SDFGridEnvExpressions.js';
 
 export class SDFGrid{
   constructor(uid, scene, params){
@@ -67,7 +68,20 @@ export class SDFGrid{
     // legacy sparse backing
     this.blobArray = [];
     this.dataTable = {};
-    this.envVariables = params.envVariables || ['O2','CO2','H2O'];
+    this.envModules = params.envModules || [];
+    if (this.envModules.length){
+      this.envExpressions = this.envModules.map(envExpressionFromModule);
+      const vars = new Set();
+      for (const expr of this.envExpressions){
+        const obj = parseEnvExpression(expr);
+        for (const k of Object.keys(obj)) vars.add(k);
+      }
+      this.envVariables = Array.from(vars);
+    } else {
+      this.envVariables = params.envVariables || ['O2','CO2','H2O'];
+      const tmpl = Object.fromEntries(this.envVariables.map(n=>[n,0]));
+      this.envExpressions = [envExpressionFromModule(tmpl)];
+    }
     this.quadrantCount = params?.quadrantCount || DEFAULT_QUADRANT_COUNT;
 
     // svg
@@ -89,7 +103,7 @@ export class SDFGrid{
 
     // caches and batching
     this._layerCache = new Map(); // z -> Float32Array (dense)
-    this._dirtyLayers = new Set();
+    this._dirtyLayers = new Map(); // z -> Set of dirty quadrant indexes
     this._flushHandle = null;
 
     // stats
