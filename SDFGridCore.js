@@ -40,6 +40,7 @@ import { updateParticles } from './SDFGridParticles.js';
 import { visualizeGrid, _valueToColor, updateVisualization } from './SDFGridVisualization.js';
 import { evolveSchema } from './SDFGridSchema.js';
 import { _initBuckets } from './SDFGridBuckets.js';
+import { envNamesFromModule } from './SDFGridEnvExpressions.js';
 import {
   getNucleus, centerCellIndex, toStateJSON, initializeGrid, updateGrid, updatePosition,
   zLayerIndexFromWorldZ, getCellData, setCellData, updateDispersion, setVisible, dispose
@@ -67,8 +68,15 @@ export class SDFGrid{
     // legacy sparse backing
     this.blobArray = [];
     this.dataTable = {};
-    this.envVariables = params.envVariables || ['O2','CO2','H2O'];
-    this.envTemplate  = Object.fromEntries(this.envVariables.map(n=>[n,0]));
+    this.envModule = params.envModule || null;
+    if (this.envModule){
+      const names = envNamesFromModule(this.envModule);
+      this.envVariables = names;
+      this.envTemplate  = Object.fromEntries(names.map(n=>[n,0]));
+    } else {
+      this.envVariables = params.envVariables || ['O2','CO2','H2O'];
+      this.envTemplate  = Object.fromEntries(this.envVariables.map(n=>[n,0]));
+    }
     this.quadrantCount = params?.quadrantCount || DEFAULT_QUADRANT_COUNT;
 
     // svg

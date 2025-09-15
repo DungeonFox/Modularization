@@ -5,11 +5,12 @@ import { createSparseQuadrants, denseFromQuadrants } from './SDFGridQuadrants.js
 
 export async function _ensureZeroTemplate(){
   const count = this.quadrantCount || DEFAULT_QUADRANT_COUNT;
-  if (!this._db) return createSparseQuadrants(count, this.envTemplate || {});
+  const source = this.envModule || this.envTemplate || {};
+  if (!this._db) return createSparseQuadrants(count, source);
   const key=`sid:${this.schema.id}`;
   let tmpl=await idbGet(this._db, STORE_BASEZ, key);
   if (!tmpl){
-    tmpl=createSparseQuadrants(count, this.envTemplate || {});
+    tmpl=createSparseQuadrants(count, source);
     await idbPut(this._db, STORE_BASEZ, key, tmpl);
   }
   return tmpl;
