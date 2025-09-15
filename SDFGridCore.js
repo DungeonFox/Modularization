@@ -30,7 +30,7 @@ import { pickNucleusByDirection } from './SDFGridNucleus.js';
 import { saveState, saveLogic, saveBlobs, loadState, loadLogic, loadBlobs, applyBlobs } from './SDFGridPersistence.js';
 import { compileLogic } from './SDFGridLogic.js';
 import { createInterpolatedShapes, sdf, sdfGrad } from './SDFGridShape.js';
-import { DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
+import { DEFAULT_QUADRANT_COUNT, DENSE_W, DENSE_H } from './SDFGridConstants.js';
 import {
   _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _denseIdx, _ensureDenseLayer,
   _mapCellToDense, _applySparseIntoDense, setDenseFromCell, addDenseFromCell,
@@ -83,6 +83,10 @@ export class SDFGrid{
       this.envExpressions = [envExpressionFromModule(tmpl)];
     }
     this.quadrantCount = params?.quadrantCount || DEFAULT_QUADRANT_COUNT;
+    this._qCols = Math.ceil(Math.sqrt(this.quadrantCount));
+    this._qRows = Math.ceil(this.quadrantCount / this._qCols);
+    this._qW = Math.ceil(DENSE_W / this._qCols);
+    this._qH = Math.ceil(DENSE_H / this._qRows);
 
     // svg
     this.svgShapes = [];
@@ -103,7 +107,7 @@ export class SDFGrid{
 
     // caches and batching
     this._layerCache = new Map(); // z -> Float32Array (dense)
-    this._dirtyLayers = new Set();
+    this._dirtyQuadrants = new Map(); // z -> Set of quadrant indices
     this._flushHandle = null;
 
     // stats
