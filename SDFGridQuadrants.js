@@ -1,4 +1,5 @@
 import { DENSE_W, DENSE_H, DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
+import { quadrantHashesFromModule } from './SDFGridEnvExpressions.js';
 
 // Quantize environment variables using the Pareto principle (top 20% retained)
 export function quantizePareto(env){
@@ -14,12 +15,9 @@ export function quantizePareto(env){
   return out;
 }
 
-// Create a sparse quadrant template, quantizing each quadrant's environment variables
-export function createSparseQuadrants(count = DEFAULT_QUADRANT_COUNT, envTemplate = {}){
-  const quads = [];
-  for (let i=0; i<count; i++){
-    quads.push(quantizePareto(envTemplate));
-  }
+// Create a sparse quadrant template with each environment variable defaulting to zero
+export function createSparseQuadrants(count = DEFAULT_QUADRANT_COUNT, envModule = {}){
+  const quads = quadrantHashesFromModule(count, envModule);
   return { quadrants: quads };
 }
 
