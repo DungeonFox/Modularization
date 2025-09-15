@@ -103,7 +103,8 @@ export class SDFGrid{
 
     // caches and batching
     this._layerCache = new Map(); // z -> Float32Array (dense)
-    this._dirtyLayers = new Set();
+    // Track dirty quadrants per layer so updates can persist granularly
+    this._dirtyQuadrants = new Map(); // z -> Set of quadrant indices
     this._flushHandle = null;
 
     // stats
