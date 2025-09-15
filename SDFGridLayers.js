@@ -121,7 +121,18 @@ export async function _ensureDenseLayer(z){
 
   const targetSchema=this.schema;
   const Fnew=targetSchema.fieldNames.length;
-  const qCount=this.quadrantCount || DEFAULT_QUADRANT_COUNT;
+
+  // Ensure quadrant count matches the base_zero template so layer
+  // quadrants align with the sparse environment template.  This fixes
+  // situations where the configured quadrantCount differs from what was
+  // persisted in base_zero, leading to missing or misordered layer
+  // quadrant keys.
+  const zeroTmpl = await this._ensureZeroTemplate();
+  const qCount = zeroTmpl.quadrants.length;
+  if (this.quadrantCount !== qCount){
+    this.quadrantCount = qCount;
+    this._quadLayout = null; // force recomputation with new count
+  }
   _ensureLayout(this);
 
   if (!this._db){
@@ -133,8 +144,9 @@ export async function _ensureDenseLayer(z){
   const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>idbGet(this._db, STORE_LAYER, `${key},${i}`)));
 
   if (buffers.every(b=>!b)){
-    const tmpl=await this._ensureZeroTemplate();
-    const arr=denseFromQuadrants(tmpl, targetSchema);
+    // No quadrants exist yet for this layer; clone from base_zero template
+    // so each layer begins with the same number of quadrants.
+    const arr=denseFromQuadrants(zeroTmpl, targetSchema);
     await this._applySparseIntoDense(z, arr);
     await Promise.all(Array.from({length:qCount},(_,i)=>{
       const quad=_sliceQuadrant.call(this, arr, i, Fnew);
@@ -148,9 +160,22 @@ export async function _ensureDenseLayer(z){
   const curList=lmeta?.fields || [];
   if (curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames)){
     const arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
+    const missing=[];
     for(let i=0;i<qCount;i++){
-      const buf=buffers[i]; if(!buf) continue;
-      _insertQuadrant.call(this, arr, i, new Float32Array(buf), Fnew);
+      const buf=buffers[i];
+      if(buf){
+        _insertQuadrant.call(this, arr, i, new Float32Array(buf), Fnew);
+      } else {
+        // Track any absent quadrants so we can persist zeroed versions
+        // to keep layer/quadrant keys in sync with base_zero.
+        missing.push(i);
+      }
+    }
+    if (missing.length){
+      await Promise.all(missing.map(i=>{
+        const quad=_sliceQuadrant.call(this, arr, i, Fnew);
+        return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
+      }));
     }
     this._layerCache.set(key,arr); return arr;
   }
