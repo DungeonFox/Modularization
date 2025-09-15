@@ -1,18 +1,18 @@
-import { DENSE_W, DENSE_H, STORE_BASE, STORE_BASEZ, STORE_LAYER, STORE_LMETA } from './SDFGridConstants.js';
+import { DENSE_W, DENSE_H, STORE_BASE, STORE_BASEZ, STORE_LAYER, STORE_LMETA, DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
 import { arraysEqual } from './SDFGridUtil.js';
 import { idbGet, idbPut } from './SDFGridStorage.js';
+import { createSparseQuadrants, denseFromQuadrants } from './SDFGridQuadrants.js';
 
 export async function _ensureZeroTemplate(){
-  if (!this._db) return null;
-  const F=this.schema.fieldNames.length;
+  const count = this.quadrantCount || DEFAULT_QUADRANT_COUNT;
+  if (!this._db) return createSparseQuadrants(count, this.envTemplate || {});
   const key=`sid:${this.schema.id}`;
-  let buf=await idbGet(this._db, STORE_BASEZ, key);
-  if (!buf){
-    const zeros=new Float32Array(DENSE_W*DENSE_H*F);
-    await idbPut(this._db, STORE_BASEZ, key, zeros.buffer);
-    buf=zeros.buffer;
+  let tmpl=await idbGet(this._db, STORE_BASEZ, key);
+  if (!tmpl){
+    tmpl=createSparseQuadrants(count, this.envTemplate || {});
+    await idbPut(this._db, STORE_BASEZ, key, tmpl);
   }
-  return buf;
+  return tmpl;
 }
 
 export async function _ensureBaseSDF(z){
@@ -66,8 +66,8 @@ export async function _ensureDenseLayer(z){
   const buf=await idbGet(this._db, STORE_LAYER, key);
 
   if (!buf){
-    const tmplBuf=await this._ensureZeroTemplate();
-    const arr=new Float32Array(tmplBuf.slice(0));
+    const tmpl=await this._ensureZeroTemplate();
+    const arr=denseFromQuadrants(tmpl, targetSchema);
     await this._applySparseIntoDense(z, arr);
     await idbPut(this._db, STORE_LAYER, key, arr.buffer);
     await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });

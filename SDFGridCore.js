@@ -1,8 +1,8 @@
-// SDFGrid.js — dense 1024×1024 per-layer Float32 overlay with zero-template base,
+// SDFGrid.js — dense 1024×1024 per-layer Float32 overlay with sparse quadrant base,
 // nucleus-centered alignment, SVG SDF, and Storage Buckets persistence.
 //
 // Dense overlay: one Float32Array per layer, length = 1024 * 1024 * F (F = #fields).
-// First creation of a layer clones a zero template from the base store (base_zero)
+// First creation of a layer clones a quantized quadrant template from the base store (base_zero)
 // and applies any existing sparse cell data center-aligned; zeros remain as padding.
 //
 // IDB inside a Storage Bucket named after UID (lowercased, sanitized):
@@ -13,8 +13,8 @@
 //       - 'schema'          : { id, fields: string[] }
 //       - `z:${z}`          : { cx, cy, w, h, rule }
 //     'base'                : per-layer Int16 SDF (key = z)    [kept for SDF usage]
-//     'base_zero'           : Float32 zero template buffers     [NEW]
-//         key = `sid:${schemaId}`  -> ArrayBuffer(1024*1024*F*4)
+//     'base_zero'           : sparse quadrant templates        [NEW]
+//         key = `sid:${schemaId}`  -> { quadrants: Array }
 //     'overlay_layers'      : per-layer Float32 dense, key = z
 //     'overlay_layers_meta' : per-layer schema version { sid, fields }, key = z
 //
@@ -30,6 +30,7 @@ import { pickNucleusByDirection } from './SDFGridNucleus.js';
 import { saveState, saveLogic, saveBlobs, loadState, loadLogic, loadBlobs, applyBlobs } from './SDFGridPersistence.js';
 import { compileLogic } from './SDFGridLogic.js';
 import { createInterpolatedShapes, sdf, sdfGrad } from './SDFGridShape.js';
+import { DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
 import {
   _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _denseIdx, _ensureDenseLayer,
   _mapCellToDense, _applySparseIntoDense, setDenseFromCell, addDenseFromCell,
@@ -67,6 +68,7 @@ export class SDFGrid{
     this.blobArray = [];
     this.dataTable = {};
     this.envVariables = params.envVariables || ['O2','CO2','H2O'];
+    this.quadrantCount = params?.quadrantCount || DEFAULT_QUADRANT_COUNT;
 
     // svg
     this.svgShapes = [];
