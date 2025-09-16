@@ -59,6 +59,31 @@ function _insertQuadrant(arr, qi, quad, F){
   }
 }
 
+const MAX_QUADRANT_WRITE_ATTEMPTS = 3;
+
+async function _persistQuadrantSequential(key, qi, arr, F){
+  const storeKey = `${key},${qi}`;
+  for (let attempt=0; attempt<MAX_QUADRANT_WRITE_ATTEMPTS; attempt++){
+    const quad=_sliceQuadrant.call(this, arr, qi, F);
+    const expectedBytes=quad.byteLength;
+    try{
+      await idbPut(this._db, STORE_LAYER, storeKey, quad.buffer);
+      const stored=await idbGet(this._db, STORE_LAYER, storeKey);
+      if (stored && stored.byteLength===expectedBytes) return;
+    }catch(err){
+      if (attempt===MAX_QUADRANT_WRITE_ATTEMPTS-1) throw err;
+    }
+    await Promise.resolve();
+  }
+  throw new Error(`Failed to persist quadrant ${qi} for layer ${key}`);
+}
+
+async function _persistQuadrantsSequential(key, arr, F, qCount){
+  for (let qi=0; qi<qCount; qi++){
+    await _persistQuadrantSequential.call(this, key, qi, arr, F);
+  }
+}
+
 function _markDirty(ctx, z, bx, by){
   const qi=_quadrantIndex.call(ctx, bx, by);
   let set=ctx._dirtyLayers.get(z|0);
@@ -121,25 +146,30 @@ export async function _ensureDenseLayer(z){
 
   const targetSchema=this.schema;
   const Fnew=targetSchema.fieldNames.length;
-  const qCount=this.quadrantCount || DEFAULT_QUADRANT_COUNT;
-  _ensureLayout(this);
 
   if (!this._db){
     const arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
     this._layerCache.set(key,arr); return arr;
   }
 
+  const zeroTemplate=await this._ensureZeroTemplate();
+  const templateQuadrants=Array.isArray(zeroTemplate?.quadrants) ? zeroTemplate.quadrants : null;
+  const configuredCount=this.quadrantCount || DEFAULT_QUADRANT_COUNT;
+  const qCount=templateQuadrants?.length ? templateQuadrants.length : configuredCount;
+  if ((this.quadrantCount||0)!==qCount){
+    this.quadrantCount=qCount;
+    this._quadLayout=null;
+  }
+  _ensureLayout(this);
+
   const lmeta=await idbGet(this._db, STORE_LMETA, key);
   const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>idbGet(this._db, STORE_LAYER, `${key},${i}`)));
 
   if (buffers.every(b=>!b)){
-    const tmpl=await this._ensureZeroTemplate();
+    const tmpl=templateQuadrants ? zeroTemplate : createSparseQuadrants(qCount, this.envExpressions || []);
     const arr=denseFromQuadrants(tmpl, targetSchema);
     await this._applySparseIntoDense(z, arr);
-    await Promise.all(Array.from({length:qCount},(_,i)=>{
-      const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-      return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-    }));
+    await _persistQuadrantsSequential.call(this, key, arr, Fnew, qCount);
     await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
     this._layerCache.set(key,arr); return arr;
   }
@@ -183,10 +213,7 @@ export async function _ensureDenseLayer(z){
     }
   }
 
-  await Promise.all(Array.from({length:qCount},(_,i)=>{
-    const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-    return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-  }));
+  await _persistQuadrantsSequential.call(this, key, arr, Fnew, qCount);
   await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
   this._layerCache.set(key,arr); return arr;
 }
